@@ -2,6 +2,8 @@
 
 A D3D9 proxy DLL that converts OutRun 2006 Coast 2 Coast from its shader-based rendering to the fixed-function pipeline (FFP), enabling full RTX Remix compatibility.
 
+**Status**: Finished ✅
+
 ## What It Does
 
 OutRun 2006 uses vertex shaders for all geometry, which RTX Remix cannot hook. This proxy intercepts the game's D3D9 device calls and:
