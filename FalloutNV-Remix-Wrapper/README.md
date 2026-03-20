@@ -59,5 +59,5 @@ Run `build.bat` from an **x86 VS Developer Command Prompt**, or just double-clic
 
 ## Credits
 
-- Wall_SoGB, BlueAmulet, and xoxor4d — [NewVegasRTXHelper](https://github.com/Kim2091/NewVegasRTXHelper), which this proxy's light extraction, skinning hooks, and transform logic are ported from
+- [Wall_SoGB](https://github.com/Wall-SoGB) — [NewVegasRTXHelper](https://github.com/Wall-SoGB/NewVegasRTXHelper), which this proxy's light extraction, skinning hooks, and transform logic are ported from
 - Developed using [Vibe-Reverse-Engineering](https://github.com/Ekozmaster/Vibe-Reverse-Engineering) — RE tooling framework (disassembly, decompilation, live tracing)
