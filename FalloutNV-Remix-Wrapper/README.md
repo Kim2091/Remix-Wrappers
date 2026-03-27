@@ -12,7 +12,6 @@ Fallout: New Vegas uses vertex and pixel shaders for all geometry, which RTX Rem
 - **Replaces vertex and pixel shaders** with the FFP pipeline on every 3D draw call, while passing through 2D/UI content (Pip-Boy, menus) with original shaders
 - **Handles skinned meshes** (characters, creatures) via FFP indexed vertex blending — clones vertex declarations to convert BLENDINDICES from D3DCOLOR to UBYTE4, uploads bone matrices per-object with game engine hooks for proper palette reset
 - **Extracts point lights** from the game's `ShadowSceneNode` light list and submits them as `D3DLIGHT9` calls so Remix can create path-traced lights
-- **Filters fake shadows** — detects and skips baked planar shadow overlays (NOLIGHTING shader + grayscale vertex colors) that conflict with ray-traced shadows
 - **Routes sky geometry** through FFP based on `NiShadeProperty` shader type detection
 - **Chain-loads RTX Remix** (`d3d9_remix.dll`) and optional side-effect DLLs (e.g. SilentPatch) so Remix sees the converted FFP geometry
 
@@ -36,7 +35,6 @@ Edit `proxy.ini` to adjust behaviour:
 | `[Remix]` | `DLLName` | `d3d9_remix.dll` | Remix DLL filename |
 | `[Chain]` | `PreloadDLL` | *(empty)* | Side-effect DLL to load at startup (e.g. SilentPatch) |
 | `[FFP]` | `AlbedoStage` | `0` | Texture stage used as the albedo |
-| `[FFP]` | `SkipFakeShadows` | `1` | Skip baked shadow overlays (gray vertex color meshes) |
 | `[Lights]` | `Enabled` | `1` | Extract engine point lights for Remix |
 | `[Lights]` | `IntensityPercent` | `100` | Light intensity multiplier (100 = 1.0x) |
 | `[Lights]` | `RangeMode` | `0` | Point light range: 0=Spec.r, 1=attenuation calc, 2=infinity |

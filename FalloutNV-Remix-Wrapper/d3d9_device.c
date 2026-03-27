@@ -62,16 +62,6 @@ extern void log_floats_dec(const char *prefix, float *data, unsigned int count);
 #define ENABLE_LIGHTS 1
 #define MAX_EXTRACTED_LIGHTS 128
 
-/* Fake shadow detection: skip BSSM_NOLIGHTING draws whose vertex colors are
- * all shades of gray (R ≈ G ≈ B). Two-step filter:
- *   1. NiShadeProperty::m_eShaderType == kProp_NoLighting (0x15)
- *   2. All vertex colors are grayscale with at least one dark vertex
- * This catches baked shadow overlays while keeping windows/glass/UI. */
-#define ENABLE_SHADOW_SKIP 1
-#define SHADOW_CACHE_SIZE 64    /* must be power of 2 */
-#define SHADOW_GRAY_TOLERANCE 5 /* max abs(R-G), abs(R-B), abs(G-B) in 0-255 */
-#define SHADOW_DARK_THRESHOLD 250 /* at least one vertex must have R < this */
-
 /* Declaration cloning cache size: maps original decl -> cloned decl with
  * BLENDINDICES type changed from D3DCOLOR to UBYTE4 for FFP compatibility. */
 #define SKIN_DECL_CACHE_SIZE 4
@@ -195,17 +185,6 @@ static int g_hooksInstalled = 0;             /* 1 if game hooks were installed *
 #define D3DDECLTYPE_DEC3N     14
 #define D3DDECLTYPE_FLOAT16_2 15
 
-#if ENABLE_SHADOW_SKIP
-#define SHADOW_UNKNOWN  0
-#define SHADOW_IS_FAKE  1
-#define SHADOW_NOT_FAKE 2
-
-typedef struct {
-    void *vb;
-    int   baseVertexIndex;
-    int   result;
-} ShadowCacheEntry;
-#endif
 
 /* (Skinning uses original VB — no vertex expansion needed for simple FFP approach) */
 
@@ -378,14 +357,6 @@ typedef struct WrappedDevice {
     int curDeclHasNormal;
     int curDeclHasColor;
     int curDeclHasPosT;     /* 1 if current decl has POSITIONT (screen-space, skips FFP transform) */
-
-#if ENABLE_SHADOW_SKIP
-    int curDeclColorOffset; /* byte offset of COLOR0 in vertex, or -1 */
-    int curDeclColorType;   /* D3DDECLTYPE of COLOR0 (3=FLOAT4, 4=D3DCOLOR) */
-    ShadowCacheEntry shadowCache[SHADOW_CACHE_SIZE];
-    int shadowSkipCount;    /* per-frame diagnostic counter */
-    int skipFakeShadows;    /* from proxy.ini [FFP] SkipFakeShadows */
-#endif
 
     /* Texcoord format for diagnostics and skinned vertex expansion */
     int curDeclTexcoordType; /* D3DDECLTYPE of TEXCOORD[0], or -1 if none */
@@ -614,7 +585,6 @@ static int GameRenderer_Is2D(void) {
  * Property chain: NiDX9Renderer +0x0C → NiPropertyState +0x0C → NiShadeProperty +0x1C
  */
 #define KPROP_SKY 0x0D
-#define KPROP_NOLIGHTING 0x15
 static int GameRenderer_IsSky(void) {
     void *ren = GAME_RENDERER_SINGLETON;
     void *propState, *shadeProp;
@@ -627,23 +597,6 @@ static int GameRenderer_IsSky(void) {
     shaderType = *(unsigned int*)((unsigned char*)shadeProp + 0x1C);
     return (shaderType == KPROP_SKY);
 }
-
-#if ENABLE_SHADOW_SKIP
-/* Check if the current draw uses BSShaderNoLightingProperty (kProp_NoLighting = 0x15).
- * Same property chain as GameRenderer_IsSky. */
-static int GameRenderer_IsNoLighting(void) {
-    void *ren = GAME_RENDERER_SINGLETON;
-    void *propState, *shadeProp;
-    unsigned int shaderType;
-    if (!ren) return 0;
-    propState = *(void**)((unsigned char*)ren + 0x0C);
-    if (!propState) return 0;
-    shadeProp = *(void**)((unsigned char*)propState + 0x0C);
-    if (!shadeProp) return 0;
-    shaderType = *(unsigned int*)((unsigned char*)shadeProp + 0x1C);
-    return (shaderType == KPROP_NOLIGHTING);
-}
-#endif
 
 /*
  * Apply transforms by reading the game's NiDX9Renderer matrices directly.
@@ -683,117 +636,6 @@ static void FFP_ApplyTransforms(WrappedDevice *self) {
 #if ENABLE_LIGHTS
 #include "d3d9_lights.h"
 #endif
-
-/* ---- Fake shadow detection ---- */
-
-#if ENABLE_SHADOW_SKIP
-/*
- * Check if all vertex colors in a buffer region are shades of gray.
- * Returns SHADOW_IS_FAKE if all verts have R ≈ G ≈ B (within tolerance)
- * and at least one vertex is darker than SHADOW_DARK_THRESHOLD.
- */
-static int CheckVertexColorsGray(unsigned char *vbData, unsigned int numVerts,
-                                  unsigned int stride, unsigned int colorOffset,
-                                  int colorType)
-{
-    unsigned int v;
-    int hasDark = 0;
-
-    for (v = 0; v < numVerts; v++) {
-        unsigned char *vert = vbData + v * stride;
-        int r, g, b;
-
-        if (colorType == D3DDECLTYPE_D3DCOLOR) {
-            unsigned char *c = vert + colorOffset;
-            b = c[0]; g = c[1]; r = c[2];
-        } else if (colorType == D3DDECLTYPE_FLOAT4) {
-            float *c = (float*)(vert + colorOffset);
-            r = (int)(c[0] * 255.0f + 0.5f);
-            g = (int)(c[1] * 255.0f + 0.5f);
-            b = (int)(c[2] * 255.0f + 0.5f);
-        } else {
-            return SHADOW_NOT_FAKE;
-        }
-
-        {
-            int dRG, dRB, dGB;
-            dRG = r - g; if (dRG < 0) dRG = -dRG;
-            dRB = r - b; if (dRB < 0) dRB = -dRB;
-            dGB = g - b; if (dGB < 0) dGB = -dGB;
-            if (dRG > SHADOW_GRAY_TOLERANCE || dRB > SHADOW_GRAY_TOLERANCE ||
-                dGB > SHADOW_GRAY_TOLERANCE) {
-                return SHADOW_NOT_FAKE;
-            }
-        }
-
-        if (r < SHADOW_DARK_THRESHOLD)
-            hasDark = 1;
-    }
-
-    return hasDark ? SHADOW_IS_FAKE : SHADOW_NOT_FAKE;
-}
-
-/*
- * Two-step fake shadow detection:
- *   1. Is the current draw NOLIGHTING? (NiShadeProperty type check)
- *   2. Are all vertex colors grayscale with at least one dark vertex?
- * Caches results per (VB, baseVertexIndex) to avoid repeated VB locks.
- */
-static int IsFakeShadow(WrappedDevice *self, int baseVertexIndex, unsigned int numVerts) {
-    void *vb;
-    unsigned int slot;
-    ShadowCacheEntry *entry;
-
-    if (!self->skipFakeShadows) return 0;
-    if (!GameRenderer_IsNoLighting()) return 0;
-    if (!self->curDeclHasColor || self->curDeclColorOffset < 0) return 0;
-
-    vb = self->streamVB[0];
-    if (!vb || self->streamStride[0] == 0 || numVerts == 0) return 0;
-
-    /* Direct-mapped cache lookup */
-    slot = (((unsigned int)(uintptr_t)vb >> 4) ^ (unsigned int)baseVertexIndex) & (SHADOW_CACHE_SIZE - 1);
-    entry = &self->shadowCache[slot];
-
-    if (entry->vb == vb && entry->baseVertexIndex == baseVertexIndex) {
-        return (entry->result == SHADOW_IS_FAKE);
-    }
-
-    /* Cache miss — lock VB read-only and check vertex colors */
-    {
-        typedef int (__stdcall *FN_Lock)(void*, unsigned int, unsigned int, void**, unsigned int);
-        typedef int (__stdcall *FN_Unlock)(void*);
-        void **vbVt = *(void***)vb;
-        unsigned char *vbData = NULL;
-        unsigned int stride = self->streamStride[0];
-        unsigned int readOff = self->streamOffset[0] + (unsigned int)baseVertexIndex * stride;
-        unsigned int readSize = numVerts * stride;
-        int lockHr, result;
-
-        lockHr = ((FN_Lock)vbVt[11])(vb, readOff, readSize, (void**)&vbData, 0x10 /*D3DLOCK_READONLY*/);
-        if (lockHr != 0 || !vbData) return 0;
-
-        result = CheckVertexColorsGray(vbData, numVerts, stride,
-                                        self->curDeclColorOffset, self->curDeclColorType);
-
-        ((FN_Unlock)vbVt[12])(vb);
-
-        entry->vb = vb;
-        entry->baseVertexIndex = baseVertexIndex;
-        entry->result = result;
-
-#if DIAG_ENABLED
-        if (DIAG_ACTIVE(self)) {
-            log_hex("  NOLIGHTING draw: vb=", (unsigned int)(uintptr_t)vb);
-            log_int("    bvi=", baseVertexIndex);
-            log_int("    numVerts=", numVerts);
-            log_int("    result=", result);
-        }
-#endif
-        return (result == SHADOW_IS_FAKE);
-    }
-}
-#endif /* ENABLE_SHADOW_SKIP */
 
 /*
  * Enter FFP mode: NULL both shaders on the real device, apply transforms,
@@ -1044,9 +886,6 @@ static int __stdcall WD_Present(WrappedDevice *self, void *a, void *b, void *c, 
         log_int("  diagFrame: ", self->diagLoggedFrames);
         log_int("  drawCalls: ", self->drawCallCount);
         log_int("  scenes: ", self->sceneCount);
-#if ENABLE_SHADOW_SKIP
-        log_int("  shadowSkipped: ", self->shadowSkipCount);
-#endif
         {
             int r;
             log_str("  VS regs written: ");
@@ -1076,9 +915,6 @@ static int __stdcall WD_Present(WrappedDevice *self, void *a, void *b, void *c, 
     self->ffpSetup = 0;
     self->drawCallCount = 0;
     self->sceneCount = 0;
-#if ENABLE_SHADOW_SKIP
-    self->shadowSkipCount = 0;
-#endif
 #if ENABLE_LIGHTS
     self->lightsUpdatedThisFrame = 0;
 #endif
@@ -1123,12 +959,6 @@ static int __stdcall WD_DrawPrimitive(WrappedDevice *self, unsigned int pt, unsi
 
     if (self->viewProjValid && self->lastDecl && !self->curDeclHasPosT && !self->curDeclIsSkinned
         && (self->curDeclHasNormal || GameRenderer_IsSky()) && !GameRenderer_Is2D()) {
-#if ENABLE_SHADOW_SKIP
-        if (IsFakeShadow(self, (int)sv, pc * 3)) {
-            self->shadowSkipCount++;
-            hr = 0; /* S_OK — skip fake shadow */
-        } else
-#endif
         {
         /* World-space non-indexed draw or sky: engage FFP */
         FFP_Engage(self);
@@ -1184,14 +1014,6 @@ static int __stdcall WD_DrawIndexedPrimitive(WrappedDevice *self,
         if (GameRenderer_Is2D()) {
             FFP_Disengage(self);
             hr = ((FN)RealVtbl(self)[SLOT_DrawIndexedPrimitive])(self->pReal, pt, bvi, mi, nv, si, pc);
-#if ENABLE_SHADOW_SKIP
-        } else if (IsFakeShadow(self, bvi, nv)) {
-            /* NOLIGHTING + all-gray vertex colors = fake baked shadow.
-             * Skip — Remix ray-traces real shadows. */
-            FFP_Disengage(self);
-            self->shadowSkipCount++;
-            hr = 0; /* S_OK */
-#endif
         } else if (self->curDeclIsSkinned) {
 #if ENABLE_SKINNING
             hr = Skin_DrawDIP(self, pt, bvi, mi, nv, si, pc);
@@ -1572,10 +1394,6 @@ static int __stdcall WD_SetVertexDeclaration(WrappedDevice *self, void *pDecl) {
     self->curDeclHasNormal = 0;
     self->curDeclHasColor = 0;
     self->curDeclHasPosT = 0;
-#if ENABLE_SHADOW_SKIP
-    self->curDeclColorOffset = -1;
-    self->curDeclColorType = -1;
-#endif
     self->curDeclTexcoordType = -1;
     self->curDeclTexcoordOff = 0;
 #if ENABLE_SKINNING
@@ -1631,10 +1449,6 @@ static int __stdcall WD_SetVertexDeclaration(WrappedDevice *self, void *pDecl) {
                     }
                     if (usage == D3DDECLUSAGE_COLOR && usageIdx == 0 && stream == 0) {
                         self->curDeclHasColor = 1;
-#if ENABLE_SHADOW_SKIP
-                        self->curDeclColorOffset = offset;
-                        self->curDeclColorType = type;
-#endif
                     }
                 }
 
@@ -1987,12 +1801,6 @@ WrappedDevice* WrappedDevice_Create(void *pRealDevice) {
 #endif
     { int s; for (s = 0; s < 4; s++) { w->streamVB[s] = NULL; w->streamOffset[s] = 0; w->streamStride[s] = 0; } }
     { int t; for (t = 0; t < 8; t++) w->curTexture[t] = NULL; }
-#if ENABLE_SHADOW_SKIP
-    { int i; for (i = 0; i < SHADOW_CACHE_SIZE; i++) { w->shadowCache[i].vb = NULL; w->shadowCache[i].result = SHADOW_UNKNOWN; } }
-    w->shadowSkipCount = 0;
-    w->curDeclColorOffset = -1;
-    w->curDeclColorType = -1;
-#endif
     w->loggedDeclCount = 0;
     { int ts; for (ts = 0; ts < 8; ts++) w->diagTexUniq[ts] = 0; }
     w->createTick = GetTickCount();
@@ -2015,9 +1823,6 @@ WrappedDevice* WrappedDevice_Create(void *pRealDevice) {
         }
         w->albedoStage = GetPrivateProfileIntA("FFP", "AlbedoStage", 0, iniBuf);
         if (w->albedoStage < 0 || w->albedoStage > 7) w->albedoStage = 0;
-#if ENABLE_SHADOW_SKIP
-        w->skipFakeShadows = GetPrivateProfileIntA("FFP", "SkipFakeShadows", 1, iniBuf);
-#endif
 #if ENABLE_LIGHTS
         w->lightsEnabled = GetPrivateProfileIntA("Lights", "Enabled", 1, iniBuf);
         {
@@ -2033,9 +1838,6 @@ WrappedDevice* WrappedDevice_Create(void *pRealDevice) {
     log_str("WrappedDevice created with FFP conversion\r\n");
     log_int("  Diag delay (ms): ", DIAG_DELAY_MS);
     log_int("  AlbedoStage: ", w->albedoStage);
-#if ENABLE_SHADOW_SKIP
-    log_int("  SkipFakeShadows: ", w->skipFakeShadows);
-#endif
 #if ENABLE_LIGHTS
     log_int("  Lights enabled: ", w->lightsEnabled);
     log_int("  IntensityPercent: ", (int)(w->lightIntensity * 100.0f));
