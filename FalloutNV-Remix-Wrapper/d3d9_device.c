@@ -379,6 +379,14 @@ typedef struct WrappedDevice {
     int lastEnabledLights;      /* number of lights enabled last frame (for cleanup) */
 #endif
 
+    /* Render target tracking: skip FFP conversion for off-screen RT draws
+     * (FaceGen face textures, shadow maps, etc. that Remix shouldn't see).
+     * Uses dimension comparison rather than pointer equality because Remix
+     * wraps surfaces, making pointer comparison unreliable. */
+    unsigned int backbufferWidth;
+    unsigned int backbufferHeight;
+    int renderingToBackbuffer;  /* 1 when RT0 dimensions match backbuffer */
+
     /* Diagnostic state */
     void *loggedDecls[32];
     int loggedDeclCount;
@@ -764,7 +772,6 @@ RELAY_THUNK(Relay_33, 33)   /* GetFrontBufferData */
 RELAY_THUNK(Relay_34, 34)   /* StretchRect */
 RELAY_THUNK(Relay_35, 35)   /* ColorFill */
 RELAY_THUNK(Relay_36, 36)   /* CreateOffscreenPlainSurface */
-RELAY_THUNK(Relay_37, 37)   /* SetRenderTarget */
 RELAY_THUNK(Relay_38, 38)   /* GetRenderTarget */
 RELAY_THUNK(Relay_39, 39)   /* SetDepthStencilSurface */
 RELAY_THUNK(Relay_40, 40)   /* GetDepthStencilSurface */
@@ -928,6 +935,29 @@ static int __stdcall WD_Present(WrappedDevice *self, void *a, void *b, void *c, 
     return hr;
 }
 
+/* 37: SetRenderTarget — track when drawing to backbuffer vs off-screen RT.
+ * Off-screen draws (FaceGen face textures, shadow maps) must not be FFP-converted
+ * because Remix would render them as scene geometry (e.g. floating NPC heads).
+ * Compares RT dimensions to backbuffer size rather than pointer equality,
+ * since Remix wraps surfaces making pointer comparison unreliable. */
+static int __stdcall WD_SetRenderTarget(WrappedDevice *self, unsigned int idx, void *pSurface) {
+    typedef int (__stdcall *FN)(void*, unsigned int, void*);
+    if (idx == 0 && pSurface) {
+        /* IDirect3DSurface9::GetDesc is vtable slot 12.
+         * D3DSURFACE_DESC layout: Format(4) Type(4) Usage(4) Pool(4)
+         *   MultiSampleType(4) MultiSampleQuality(4) Width(4) Height(4) = 32 bytes */
+        typedef int (__stdcall *FN_GetDesc)(void*, void*);
+        unsigned int desc[8];
+        int hr2 = ((FN_GetDesc)(*(void***)pSurface)[12])(pSurface, desc);
+        if (hr2 == 0)
+            self->renderingToBackbuffer = (desc[6] == self->backbufferWidth &&
+                                           desc[7] == self->backbufferHeight);
+        else
+            self->renderingToBackbuffer = 1; /* assume backbuffer on failure */
+    }
+    return ((FN)RealVtbl(self)[SLOT_SetRenderTarget])(self->pReal, idx, pSurface);
+}
+
 /* 41: BeginScene */
 static int __stdcall WD_BeginScene(WrappedDevice *self) {
     typedef int (__stdcall *FN)(void*);
@@ -957,7 +987,8 @@ static int __stdcall WD_DrawPrimitive(WrappedDevice *self, unsigned int pt, unsi
     int hr;
     self->drawCallCount++;
 
-    if (self->viewProjValid && self->lastDecl && !self->curDeclHasPosT && !self->curDeclIsSkinned
+    if (self->renderingToBackbuffer && self->viewProjValid && self->lastDecl
+        && !self->curDeclHasPosT && !self->curDeclIsSkinned
         && (self->curDeclHasNormal || GameRenderer_IsSky()) && !GameRenderer_Is2D()) {
         {
         /* World-space non-indexed draw or sky: engage FFP */
@@ -1007,7 +1038,12 @@ static int __stdcall WD_DrawIndexedPrimitive(WrappedDevice *self,
     int hr;
     self->drawCallCount++;
 
-    if (self->viewProjValid) {
+    if (!self->renderingToBackbuffer) {
+        /* Off-screen render target (FaceGen, shadow maps, etc.) — passthrough.
+         * FFP-converting these causes Remix to render them as scene geometry. */
+        FFP_Disengage(self);
+        hr = ((FN)RealVtbl(self)[SLOT_DrawIndexedPrimitive])(self->pReal, pt, bvi, mi, nv, si, pc);
+    } else if (self->viewProjValid) {
         /* 2D content (orthographic projection) — Pip-Boy, menus, UI overlays.
          * Skip FFP entirely so it renders with the game's original shaders.
          * From NewVegasRTXHelper: is2D = (projMatrix.m[3][3]==1.0 && projMatrix.m[2][3]==0.0) */
@@ -1590,7 +1626,7 @@ WrappedDevice* WrappedDevice_Create(void *pRealDevice) {
     s_device_vtbl[34] = (void*)Relay_34;
     s_device_vtbl[35] = (void*)Relay_35;
     s_device_vtbl[36] = (void*)Relay_36;
-    s_device_vtbl[37] = (void*)Relay_37;
+    s_device_vtbl[37] = (void*)WD_SetRenderTarget;  /* INTERCEPTED */
     s_device_vtbl[38] = (void*)Relay_38;
     s_device_vtbl[39] = (void*)Relay_39;
     s_device_vtbl[40] = (void*)Relay_40;
@@ -1678,6 +1714,27 @@ WrappedDevice* WrappedDevice_Create(void *pRealDevice) {
     w->refCount = 1;
     w->frameCount = 0;
     w->ffpSetup = 0;
+
+    /* Grab backbuffer dimensions for render target tracking.
+     * Off-screen RTs (FaceGen, shadow maps) have smaller dimensions. */
+    {
+        typedef int (__stdcall *FN_GetBB)(void*, unsigned int, unsigned int, unsigned int, void**);
+        typedef int (__stdcall *FN_GetDesc)(void*, void*);
+        typedef unsigned long (__stdcall *FN_Release)(void*);
+        void *bb = NULL;
+        int bbhr = ((FN_GetBB)(*(void***)pRealDevice)[SLOT_GetBackBuffer])(pRealDevice, 0, 0, 0, &bb);
+        w->backbufferWidth = 0;
+        w->backbufferHeight = 0;
+        w->renderingToBackbuffer = 1;
+        if (bbhr == 0 && bb) {
+            unsigned int desc[8];
+            if (((FN_GetDesc)(*(void***)bb)[12])(bb, desc) == 0) {
+                w->backbufferWidth = desc[6];
+                w->backbufferHeight = desc[7];
+            }
+            ((FN_Release)(*(void***)bb)[2])(bb);
+        }
+    }
     w->worldDirty = 0;
     w->viewProjDirty = 0;
     w->psConstDirty = 0;
@@ -1844,5 +1901,7 @@ WrappedDevice* WrappedDevice_Create(void *pRealDevice) {
     log_int("  RangeMode: ", w->lightRangeMode);
 #endif
     log_hex("  Real device: ", (unsigned int)pRealDevice);
+    log_int("  Backbuffer width: ", w->backbufferWidth);
+    log_int("  Backbuffer height: ", w->backbufferHeight);
     return w;
 }
