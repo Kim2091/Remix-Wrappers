@@ -1,0 +1,12 @@
+{
+  "name": "ForceBumpTerrain",
+  "arch": "x64",
+  "base": "0x140000000",
+  "description": "Force high-quality bump terrain at all zoom levels by NOPing the call that enables baked (low-quality) terrain during zoom-out. Targets TerrainCameraState_Update -> SetUseBakedTerrain(1).",
+  "verify": [
+    {"addr": "0x1402CF7D2", "expect": "E8 F9 80 E6 FF"}
+  ],
+  "patches": [
+    {"name": "NopSetBakedTerrainCall", "type": "nop", "addr": "0x1402CF7D2", "count": 5}
+  ]
+}
