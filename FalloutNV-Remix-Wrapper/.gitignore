@@ -39,3 +39,11 @@
 
 # Re-ignore build output (overrides the above)
 build/
+
+# Re-ignore private research artifacts (overrides the *.md / *.h whitelist).
+# These are RE/dev notes for the FNV-comp workstream and must not be published.
+day_night_research.md
+findings.md
+nvremixbridge_crash_analysis.md
+nvremixbridge_crash_analysis_2.md
+kb.h
