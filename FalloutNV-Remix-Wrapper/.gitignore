@@ -1,0 +1,41 @@
+# Whitelist .gitignore — only tracked file types and directories are allowed.
+# Everything else (build artifacts, IDE files, OS junk) is ignored by default.
+# Goal: Prevent uploading files that may be copyrighted or are otherwise unnecessary.
+
+# Ignore everything
+*
+
+# Allow looking into subdirectories
+!*/
+
+# Source code
+!*.cpp
+!*.hpp
+!*.h
+!*.c
+!*.inc
+!*.inl
+
+# Build script and config
+!build.bat
+!*.ini
+!*.conf
+!.gitignore
+!.editorconfig
+
+# Dependency libraries needed for linking
+!*.lib
+
+# Deployed binaries (ASI loader)
+!*.dll
+!*.def
+
+# Assets
+!*.png
+
+# Documentation
+!*.md
+!LICENSE
+
+# Re-ignore build output (overrides the above)
+build/
