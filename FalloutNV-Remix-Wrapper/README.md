@@ -21,10 +21,12 @@ Fallout: New Vegas uses vertex and pixel shaders for all geometry, which RTX Rem
 
 1. Install RTX Remix runtime to the game folder
 2. (Optional) Rename Remix's `d3d9.dll` to `d3d9_remix.dll` and set `[Remix] Enabled=1` in `remix-comp.ini` if you want the comp to chain-load it
-3. Copy `dinput8.dll`, the built `*-comp.asi` (e.g. `FNV-comp.asi` or `remix-comp.asi`), and `remix-comp.ini` into the game folder (next to `FalloutNV.exe`)
-4. Launch the game
+3. Copy `dinput8.dll` into the game folder (next to `FalloutNV.exe`)
+4. Copy `remix-comp.ini` into the game folder (next to `FalloutNV.exe`) — see ini placement note below
+5. Copy the built `*-comp.asi` (e.g. `FNV-comp.asi` or `remix-comp.asi`) either next to `FalloutNV.exe` or into a `plugins/` subfolder (Ultimate ASI Loader finds it in both)
+6. Launch the game
 
-> **Note:** `remix-comp.ini` must be present alongside the comp `.asi`. Console output and the log file carry diagnostic info.
+> **Important — ini location:** `remix-comp.ini` is read from the **game root** (next to `FalloutNV.exe`) only. It is **not** read from `plugins/` even if you place the `.asi` there. Putting a copy next to the `.asi` is a common mistake and the plugin will silently fall back to defaults. Console output and the log file carry diagnostic info.
 
 ## Configuration
 
@@ -42,6 +44,7 @@ Edit `remix-comp.ini` to adjust behaviour. Key sections:
 | `[Lights]` | `RangeMode` | `0` | Point light range: 0=Spec.r, 1=attenuation calc, 2=infinity |
 | `[SunCycle]` | `Enabled` | `1` | Drive `rtx.atmosphere.sun*` from scene-graph orientation |
 | `[MoonCycle]` | `Enabled` | `1` | Drive `rtx.atmosphere.moon0.*` from scene-graph orientation |
+| `[Culling]` | `Enabled` | `0` | Disable `BSCullingProcess` so Remix sees off-screen geometry (Wall_SoGB patch) |
 | `[Diagnostics]` | `Enabled` | `1` | Log draw-call data after `DelayMs` |
 | `[Tracer]` | `BacktraceDepth` | `8` | D3D9 call tracer call-stack depth |
 
