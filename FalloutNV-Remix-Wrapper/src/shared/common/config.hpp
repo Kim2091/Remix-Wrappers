@@ -41,6 +41,11 @@ namespace shared::common
 			bool enabled = false;
 		} skinning;
 
+		struct culling_settings
+		{
+			bool enabled = false;
+		} culling;
+
 		struct lights_settings
 		{
 			bool enabled = true;

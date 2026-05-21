@@ -603,6 +603,116 @@ namespace comp::game
 
 
 	// ================================================================
+	// Game engine hooks (culling)
+	//
+	// Wall_SoGB's "disable culling" patch ported from NewVegasRTXHelper
+	// (TESReloaded/Core/Hooks/NewVegas/Culling.cpp). Forces
+	// BSCullingProcess::SetCullMode to CULL_ALLPASS at one call site,
+	// and replaces BSCullingProcess::Process so every visited NiAVObject
+	// gets OnVisible'd directly without frustum/portal testing. Lets
+	// Remix path-trace off-screen geometry that vanilla would reject.
+	// ================================================================
+
+	// Partial layout of BSCullingProcess - only the two fields we touch.
+	// Upstream: NewVegasRTXHelper/.../GameNi.h (BSCullingProcess + NiCullingProcess).
+	struct BSCullingProcess
+	{
+		unsigned char  pad00[0x90];
+		unsigned int   kCullMode;          // +0x90 (static_assert in upstream)
+		unsigned int   eTypeStack[10];     // +0x94
+		unsigned int   uiStackIndex;       // +0xBC
+		void*          pCompoundFrustum;   // +0xC0
+	};
+
+	// NiAVObject::OnVisible vtable byte offset.
+	// NiRefObject (2 virtuals: 0x00,0x01) + NiObject (0x02-0x22) + NiObjectNET (no new
+	// virtuals) + NiAVObject (UpdateControllers..OnVisible spans 0x23-0x35) = slot 0x35.
+	// Slot 0x36 PurgeRendererData is annotated "last is 036 verified" upstream.
+	static constexpr unsigned int NIAVOBJECT_ONVISIBLE_VTBL_BYTE_OFFSET = 0x35u * 4u;
+
+	static void __fastcall BSCullingProcess_SetCullModeEx(
+		BSCullingProcess* apThis, void* /*edx*/, unsigned int /*eType*/)
+	{
+		apThis->kCullMode = 1; // CULL_ALLPASS
+	}
+
+	static void __fastcall BSCullingProcess_ProcessEx(
+		BSCullingProcess* apThis, void* /*edx*/, void* apObject)
+	{
+		apThis->pCompoundFrustum = nullptr;
+
+		// Dispatch apObject->OnVisible(apThis) through the vtable, without needing
+		// the full NiAVObject hierarchy in this TU.
+		using OnVisible_t = void (__thiscall*)(void*, BSCullingProcess*);
+		auto* vtbl = *reinterpret_cast<unsigned char**>(apObject);
+		auto fn = *reinterpret_cast<OnVisible_t*>(vtbl + NIAVOBJECT_ONVISIBLE_VTBL_BYTE_OFFSET);
+		fn(apObject, apThis);
+	}
+
+	static void install_culling_hooks()
+	{
+		if (!shared::common::config::get().culling.enabled)
+		{
+			shared::common::log("Game", "Culling: hooks SKIPPED (config disabled)");
+			return;
+		}
+
+		bool ok = true;
+
+		// Hook 1 (0x8743A6): rewrite a 5-byte relative CALL so this one call site
+		// goes to our SetCullMode replacement. Sanity-check the opcode first; if
+		// FNV is patched/cracked differently we want to log and skip, not corrupt code.
+		{
+			auto* addr = reinterpret_cast<unsigned char*>(0x8743A6);
+			DWORD old_prot;
+			if (addr[0] != 0xE8)
+			{
+				shared::common::log("Game",
+					std::format("Culling: WARNING - 0x8743A6 opcode 0x{:02X}, expected 0xE8; skipping SetCullMode hook", addr[0]),
+					shared::common::LOG_TYPE::LOG_TYPE_WARN);
+				ok = false;
+			}
+			else if (VirtualProtect(addr, 5, PAGE_EXECUTE_READWRITE, &old_prot))
+			{
+				auto target   = reinterpret_cast<uintptr_t>(&BSCullingProcess_SetCullModeEx);
+				auto site_end = reinterpret_cast<uintptr_t>(addr + 5);
+				*reinterpret_cast<int*>(addr + 1) = static_cast<int>(target - site_end);
+				VirtualProtect(addr, 5, old_prot, &old_prot);
+				shared::common::log("Game", "Culling: patched 0x8743A6 (SetCullMode -> CULL_ALLPASS)");
+			}
+			else
+			{
+				shared::common::log("Game", "Culling: WARNING - failed to patch 0x8743A6",
+					shared::common::LOG_TYPE::LOG_TYPE_WARN);
+				ok = false;
+			}
+		}
+
+		// Hook 2 (0x101E330): vtable slot 0x11 of BSCullingProcess_vtable
+		// (0x101E2EC + 0x44). Replace Process(NiAVObject*) with our visit-all stub.
+		{
+			auto* slot = reinterpret_cast<void**>(0x101E330);
+			DWORD old_prot;
+			if (VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old_prot))
+			{
+				*slot = reinterpret_cast<void*>(&BSCullingProcess_ProcessEx);
+				VirtualProtect(slot, sizeof(void*), old_prot, &old_prot);
+				shared::common::log("Game", "Culling: patched vtable slot 0x101E330 (Process -> visit all)");
+			}
+			else
+			{
+				shared::common::log("Game", "Culling: WARNING - failed to patch vtable at 0x101E330",
+					shared::common::LOG_TYPE::LOG_TYPE_WARN);
+				ok = false;
+			}
+		}
+
+		if (ok)
+			shared::common::log("Game", "Culling: hooks installed (BSCullingProcess SetCullMode + Process)");
+	}
+
+
+	// ================================================================
 	// Address init
 	// ================================================================
 
@@ -646,6 +756,9 @@ namespace comp::game
 
 		// Install skinning hooks (hardcoded addresses — FNV specific)
 		install_skinning_hooks();
+
+		// Install culling-disable hooks (Wall_SoGB patch port)
+		install_culling_hooks();
 
 		if (use_pattern)
 		{

@@ -64,6 +64,9 @@ namespace shared::common
 		// [Skinning]
 		skinning.enabled = get_bool("Skinning", "Enabled", false);
 
+		// [Culling]
+		culling.enabled = get_bool("Culling", "Enabled", false);
+
 		// [Lights]
 		lights.enabled = get_bool("Lights", "Enabled", true);
 		lights.intensity_percent = get_int("Lights", "IntensityPercent", 100);
@@ -89,6 +92,8 @@ namespace shared::common
 			ffp.enabled ? 1 : 0, ffp.albedo_stage, ffp.terrain_albedo_stage, ffp.bi_albedo_stage));
 		if (skinning.enabled)
 			log("Config", "Skinning ENABLED", LOG_TYPE::LOG_TYPE_WARN);
+		if (culling.enabled)
+			log("Config", "Culling ENABLED (BSCullingProcess disabled)", LOG_TYPE::LOG_TYPE_WARN);
 		log("Config", std::format("Lights={} Intensity={}% RangeMode={}",
 			lights.enabled ? 1 : 0, lights.intensity_percent, lights.range_mode));
 		log("Config", std::format("SunCycle={} MoonCycle={}",
