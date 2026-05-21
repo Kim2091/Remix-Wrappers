@@ -138,6 +138,7 @@ namespace comp
 			IDirect3DDevice9 *m_pIDirect3DDevice9;
 		};
 
+	public:
 		class _d3d9 final : public IDirect3D9
 		{
 		public:
@@ -198,8 +199,5 @@ namespace comp
 		private:
 			IDirect3D9Ex* m_pIDirect3D9Ex;
 		};
-
-		static IDirect3D9* __stdcall direct3d_create9_stub(UINT sdk);
-		static IDirect3D9* WINAPI HookedDirect3DCreate9(UINT SDKVersion);
 	};
 }

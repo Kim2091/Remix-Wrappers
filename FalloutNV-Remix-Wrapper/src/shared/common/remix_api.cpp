@@ -632,36 +632,62 @@ namespace shared::common
 	void remix_api::initialize(
 		PFN_remixapi_BridgeCallback begin_scene_callback,
 		PFN_remixapi_BridgeCallback end_scene_callback,
-		PFN_remixapi_BridgeCallback present_callback, 
-		bool is_asi)
+		PFN_remixapi_BridgeCallback present_callback,
+		bool /*is_asi*/)
 	{
 		auto& instance = get();
-		if (!instance.m_initialized)
+		if (instance.m_initialized) return;
+
+		// We ARE d3d9.dll, so bridge_initRemixApi's GetModuleHandleA("d3d9.dll")
+		// would find us instead of the Remix bridge. Use the proxy's chain module
+		// handle directly to reach the actual Remix bridge DLL.
+		HMODULE remix_module = shared::globals::d3d9_chain_module;
+		if (!remix_module) return;
+
+		auto pfn_init = (PFN_remixapi_InitializeLibrary)
+			GetProcAddress(remix_module, remixapi::exported_func_name::initRemixApi);
+		if (!pfn_init)
 		{
-			(void)is_asi; // upstream bridge_initRemixApi no longer takes is_asi; kept on outer initialize() sig for API stability
-			if (const auto status = remixapi::bridge_initRemixApi(&instance.m_bridge);
-				status == REMIXAPI_ERROR_CODE_SUCCESS)
-			{
-				instance.begin_scene_callback_external = begin_scene_callback;
-				instance.end_scene_callback_external = end_scene_callback;
-				instance.present_callback_external = present_callback;
-
-				remixapi::bridge_setRemixApiCallbacks(begin_scene_callback_internal, end_scene_callback_internal, present_callback_internal);
-
-				// Disabled: init_debug_lines + circle reservations issue 4 CreateMaterial calls
-				// during the brief window between bridge handshake and the game's real CreateDevice,
-				// which races with the game's d3d9 enumeration teardown and ends up failing on the
-				// server. For sun_cycle (SetConfigVariable only) we don't need debug lines at all.
-				// instance.init_debug_lines();
-				// instance.m_debug_circles.reserve(512);
-				// instance.m_debug_circle_materials.reserve(512);
-
-				instance.m_initialized = true;
-				shared::common::log("RemixApi", "Initialized RemixApi", shared::common::LOG_TYPE::LOG_TYPE_STATUS, true);
-			}
-			else {
-				shared::common::log("RemixApi", std::format("Failed to initialize the remixApi - Code: {:d}", static_cast<int>(status)), shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
-			}
+			shared::common::log("RemixApi", "Remix bridge does not export remixapi_InitializeLibrary (not an RTX Remix DLL?)",
+				shared::common::LOG_TYPE::LOG_TYPE_WARN);
+			return;
 		}
+
+		const remixapi_InitializeLibraryInfo init_info{
+			REMIXAPI_STRUCT_TYPE_INITIALIZE_LIBRARY_INFO, nullptr,
+			REMIXAPI_VERSION_MAKE(REMIXAPI_VERSION_MAJOR, REMIXAPI_VERSION_MINOR, REMIXAPI_VERSION_PATCH)
+		};
+		remixapi_Interface iface{};
+		const auto status = pfn_init(&init_info, &iface);
+
+		if (status != REMIXAPI_ERROR_CODE_SUCCESS)
+		{
+			shared::common::log("RemixApi",
+				std::format("Failed to initialize the remixApi - Code: {:d}", static_cast<int>(status)),
+				shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
+			return;
+		}
+
+		instance.m_bridge = iface;
+		instance.begin_scene_callback_external = begin_scene_callback;
+		instance.end_scene_callback_external = end_scene_callback;
+		instance.present_callback_external = present_callback;
+
+		// Register callbacks through the Remix bridge module
+		auto pfn_callbacks = (PFN_remixapi_RegisterCallbacks)
+			GetProcAddress(remix_module, remixapi::exported_func_name::registerCallbacks);
+		if (pfn_callbacks)
+			pfn_callbacks(begin_scene_callback_internal, end_scene_callback_internal, present_callback_internal);
+
+		// Disabled: init_debug_lines + circle reservations issue 4 CreateMaterial calls
+		// during the brief window between bridge handshake and the game's real CreateDevice,
+		// which races with the game's d3d9 enumeration teardown and ends up failing on the
+		// server. For sun_cycle (SetConfigVariable only) we don't need debug lines at all.
+		// instance.init_debug_lines();
+		// instance.m_debug_circles.reserve(512);
+		// instance.m_debug_circle_materials.reserve(512);
+
+		instance.m_initialized = true;
+		shared::common::log("RemixApi", "Initialized RemixApi", shared::common::LOG_TYPE::LOG_TYPE_STATUS, true);
 	}
 }

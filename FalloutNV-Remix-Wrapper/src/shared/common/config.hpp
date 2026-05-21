@@ -70,7 +70,8 @@ namespace shared::common
 
 		struct chain_settings
 		{
-			std::string preload_dll;
+			std::string preload;   // semicolon-separated DLLs/ASIs loaded before d3d9 chain
+			std::string postload;  // semicolon-separated DLLs/ASIs loaded after init
 		} chain;
 
 		struct tracer_settings

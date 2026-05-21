@@ -1,13 +1,13 @@
 @echo off
 setlocal enabledelayedexpansion
 
-:: remix-comp build script
+:: remix-comp build script (d3d9.dll proxy)
 :: Usage: build.bat [release|debug] [--name OutputName] [--comp CompDir]
 ::
 :: Examples:
-::   build.bat                          Build release remix-comp.asi
-::   build.bat debug                    Build debug remix-comp.asi
-::   build.bat release --name Warband   Build release Warband-comp.asi
+::   build.bat                          Build release d3d9.dll
+::   build.bat debug                    Build debug d3d9.dll
+::   build.bat release --name Warband   Build release d3d9.dll (Warband variant PDB)
 ::   build.bat release --name Warband --comp ..\..\patches\Warband\proxy\comp
 ::                                      Build per-game variant from custom comp dir
 
@@ -93,9 +93,9 @@ if /i "%CONFIG%"=="release" (
 )
 
 echo.
-echo === remix-comp build ===
+echo === remix-comp build (d3d9.dll proxy) ===
 echo Config:  %CONFIG%
-echo Output:  %GAME_OUT%\%NAME%.asi
+echo Output:  %GAME_OUT%\d3d9.dll
 echo CompDir: %COMP_DIR%
 echo.
 
@@ -171,7 +171,7 @@ if errorlevel 1 goto :fail
 :: -------------------------------------------------------
 :: Step 4: comp DLL (C++ with PCH, links everything)
 :: -------------------------------------------------------
-echo [4/4] %NAME%
+echo [4/4] %NAME% (d3d9.dll)
 
 :: Create PCH
 cl /nologo /c %CF% %INC% /I"%COMP_DIR%\.." ^
@@ -194,33 +194,33 @@ cl /nologo /c %CF% %INC% /I"%COMP_DIR%\.." ^
     %COMP_SRCS%
 if errorlevel 1 goto :fail
 
-:: Link DLL
+:: Link DLL as d3d9.dll proxy (exports via .def, no d3d9.lib import)
 link /nologo /DLL /SUBSYSTEM:WINDOWS /DEBUG /PDBCompress %LF% %LIBPATH% ^
-    /OUT:"%GAME_OUT%\%NAME%.dll" ^
+    /DEF:"%ROOT%d3d9.def" ^
+    /OUT:"%GAME_OUT%\d3d9.dll" ^
     /PDB:"%GAME_OUT%\%NAME%.pdb" ^
     "%GAME_OBJ%\*.obj" ^
     "%OUT%\_shared.lib" ^
     "%OUT%\imgui.lib" ^
     "%OUT%\minhook.lib" ^
-    d3d9.lib d3dx9.lib psapi.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib
+    d3dx9.lib psapi.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib
 if errorlevel 1 goto :fail
 
-:: Rename to .asi
-move /y "%GAME_OUT%\%NAME%.dll" "%GAME_OUT%\%NAME%.asi" >nul
-if errorlevel 1 goto :fail
-
-:: Copy deploy files to game build folder
+:: Copy INI to build output (game-specific copy takes priority over template)
 if "!CUSTOM_COMP!"=="1" (
-    if exist "%ROOT%assets\dinput8.dll" (
-        copy /y "%ROOT%assets\dinput8.dll" "%GAME_OUT%\dinput8.dll" >nul
-    )
     if exist "!GAME_DIR!\remix-comp.ini" (
         copy /y "!GAME_DIR!\remix-comp.ini" "%GAME_OUT%\remix-comp.ini" >nul
+    ) else if exist "%ROOT%remix-comp.ini" (
+        copy /y "%ROOT%remix-comp.ini" "%GAME_OUT%\remix-comp.ini" >nul
+    )
+) else (
+    if exist "%ROOT%remix-comp.ini" (
+        copy /y "%ROOT%remix-comp.ini" "%GAME_OUT%\remix-comp.ini" >nul
     )
 )
 
 echo.
-echo === Build succeeded: %GAME_OUT%\%NAME%.asi ===
+echo === Build succeeded: %GAME_OUT%\d3d9.dll ===
 exit /b 0
 
 :fail

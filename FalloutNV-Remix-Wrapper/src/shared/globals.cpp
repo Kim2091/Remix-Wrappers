@@ -21,7 +21,7 @@ namespace shared::globals
 	void setup_exe_module()
 	{
 		exe_hmodule = GetModuleHandleA(nullptr);
-		exe_module_addr = (DWORD)exe_hmodule;
+		exe_module_addr = (DWORD)exe_hmodule; // x64: use uintptr_t
 
 		MODULEINFO moduleInfo;
 		if (!GetModuleInformation(GetCurrentProcess(), exe_hmodule, &moduleInfo, sizeof(moduleInfo))) {
@@ -36,17 +36,18 @@ namespace shared::globals
 	void setup_dll_module(const HMODULE mod)
 	{
 		dll_hmodule = mod;
-		dll_module_addr = (DWORD)dll_hmodule;
+		dll_module_addr = (DWORD)dll_hmodule; // x64: use uintptr_t
 	}
 
 	void setup_homepath()
-	{	// init filepath var
-		char path[MAX_PATH]; GetModuleFileNameA(nullptr, path, MAX_PATH);
+	{
+		char path[MAX_PATH]; GetModuleFileNameA(dll_hmodule, path, MAX_PATH);
 		root_path = std::filesystem::path(path).parent_path().string();
 	}
 
 	IDirect3DDevice9* d3d_device = nullptr;
 	IDirect3D9* d3d9_interface = nullptr;
+	HMODULE d3d9_chain_module = nullptr;
 
 	bool imgui_is_rendering = false;
 	bool imgui_menu_open = false;

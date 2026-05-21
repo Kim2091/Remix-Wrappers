@@ -1,5 +1,6 @@
 ﻿#include "std_include.hpp"
 #include "d3d9ex.hpp"
+#include "../d3d9_proxy.hpp"
 
 #include "diagnostics.hpp"
 #include "imgui.hpp"
@@ -1039,48 +1040,36 @@ namespace comp
 	}
 #pragma endregion
 
-	IDirect3D9* __stdcall d3d9ex::direct3d_create9_stub(UINT sdk)
-	{
-		// You could also create a d3d9ex interface if you wanted to:
-		/*std::cout << "[D3D9] Game is invoking 'Direct3DCreate9'. Creating proxy interface.\n";
-		{
-			IDirect3D9Ex* d3d9ex = nullptr;
-			if (SUCCEEDED(Direct3DCreate9Ex(sdk, &d3d9ex))) {
-				return (new d3d9ex::_d3d9ex(d3d9ex));
-			}
-		}*/
+	d3d9ex::d3d9ex() {}
+}
 
-		shared::common::log("d3d9", "Game is invoking 'Direct3DCreate9'. Creating proxy interface.", shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, false);
-		shared::globals::d3d9_interface = new d3d9ex::_d3d9(Direct3DCreate9(sdk));
-		return shared::globals::d3d9_interface;
-	}
+// ---- Exported entry points (linked via d3d9.def) ----
 
-	typedef IDirect3D9* (WINAPI* Direct3DCreate9_t)(UINT SDKVersion);
-	Direct3DCreate9_t Direct3DCreate9_original = nullptr;
+extern "C" IDirect3D9* WINAPI Direct3DCreate9(UINT SDKVersion)
+{
+	shared::common::log("d3d9", "Direct3DCreate9 called. Creating proxy interface.");
+	auto real_fn = d3d9_proxy::get_Direct3DCreate9();
+	if (!real_fn) return nullptr;
 
-	IDirect3D9* WINAPI d3d9ex::HookedDirect3DCreate9(UINT SDKVersion)
-	{
-		shared::common::log("d3d9", "Game is invoking 'Direct3DCreate9'. Creating proxy interface.", shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, false);
-		shared::globals::d3d9_interface = new d3d9ex::_d3d9(Direct3DCreate9_original(SDKVersion));
-		return shared::globals::d3d9_interface;
-	}
+	IDirect3D9* real_d3d9 = real_fn(SDKVersion);
+	if (!real_d3d9) return nullptr;
 
-	d3d9ex::d3d9ex()
-	{
-		// Detour remix' Direct3DCreate9 detour :p
-		// We end up with GameD3D -> OurD3D -> BridgeD3D -> Runtime
-		const auto addr = (DWORD)GetProcAddress(GetModuleHandleA("d3d9.dll"), "Direct3DCreate9");
+	shared::globals::d3d9_interface = new comp::d3d9ex::_d3d9(real_d3d9);
+	return shared::globals::d3d9_interface;
+}
 
-		// Idea: this project could also act as a d3d9.dll, which gets loaded by the game automatically -> no asiloader required.
-		// To load remix, the project would then need to load a renamed remix bridge dll (eg. "d3d9_remix.dll") 
+extern "C" HRESULT WINAPI Direct3DCreate9Ex(UINT SDKVersion, IDirect3D9Ex** ppD3D)
+{
+	shared::common::log("d3d9", "Direct3DCreate9Ex called. Creating proxy interface.");
+	auto real_fn = d3d9_proxy::get_Direct3DCreate9Ex();
+	if (!real_fn || !ppD3D) return D3DERR_NOTAVAILABLE;
 
-		const auto status = MH_CreateHook((LPVOID)addr, &d3d9ex::HookedDirect3DCreate9, (LPVOID*)&Direct3DCreate9_original);
-		MH_EnableHook(MH_ALL_HOOKS);
+	IDirect3D9Ex* real_d3d9ex = nullptr;
+	HRESULT hr = real_fn(SDKVersion, &real_d3d9ex);
+	if (FAILED(hr) || !real_d3d9ex) return hr;
 
-		if (status == MH_OK) {
-			shared::common::log("d3d9", "Hooked 'Direct3DCreate9' import.", shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, false);
-		}
-
-		shared::common::log("d3d9", "Module initialized.", shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, false);
-	}
+	auto* proxy = new comp::d3d9ex::_d3d9ex(real_d3d9ex);
+	shared::globals::d3d9_interface = proxy;
+	*ppD3D = proxy;
+	return hr;
 }

@@ -2,9 +2,9 @@
 #include <psapi.h>
 
 #include "comp.hpp"
+#include "d3d9_proxy.hpp"
 #include "shared/common/flags.hpp"
 #include "shared/common/config.hpp"
-#include "modules/d3d9ex.hpp"
 
 namespace comp
 {
@@ -68,6 +68,9 @@ namespace comp
 			Beep(523, 100);
 		}
 
+		// Post-load DLLs (after window is found, game is running)
+		d3d9_proxy::load_postload_dlls();
+
 		comp::main();
 		return 0;
 	}
@@ -85,10 +88,18 @@ BOOL APIENTRY DllMain(HMODULE hmodule, const DWORD ul_reason_for_call, LPVOID)
 		shared::common::set_console_color_blue(true);
 		std::cout << "Launching RTX Remix Comp - Fallout: New Vegas [" << COMP_MOD_VERSION_MAJOR << "." << COMP_MOD_VERSION_MINOR << "." << COMP_MOD_VERSION_PATCH << "]\n";
 		std::cout << "> Compiled On : " + std::string(__DATE__) + " " + std::string(__TIME__) + "\n";
-		std::cout << "> Ported from FNV_proxy to remix-comp framework\n\n";
+		std::cout << "> Ported from FNV_proxy to remix-comp framework\n";
+		std::cout << "> Running as d3d9.dll proxy\n\n";
 		shared::common::set_console_color_default();
 
 		shared::common::config::get().load(shared::globals::root_path + "\\remix-comp.ini");
+
+		// Pre-load DLLs (before the d3d9 chain is established)
+		d3d9_proxy::load_preload_dlls();
+
+		// Load the real d3d9 chain (Remix bridge or system d3d9.dll)
+		if (!d3d9_proxy::init())
+			return TRUE;
 
 		if (const auto MH_INIT_STATUS = MH_Initialize(); MH_INIT_STATUS != MH_STATUS::MH_OK)
 		{
@@ -97,8 +108,6 @@ BOOL APIENTRY DllMain(HMODULE hmodule, const DWORD ul_reason_for_call, LPVOID)
 		}
 
 		comp::game::init_game_addresses();
-
-		shared::common::loader::module_loader::register_module(std::make_unique<comp::d3d9ex>());
 
 		if (const auto t = CreateThread(nullptr, 0, comp::find_game_window, nullptr, 0, nullptr); t) {
 			CloseHandle(t);

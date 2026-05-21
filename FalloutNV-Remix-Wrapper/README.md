@@ -1,12 +1,12 @@
 # Fallout: New Vegas — RTX Remix Comp
 
-An ASI plugin that converts Fallout: New Vegas from its shader-based rendering to the fixed-function pipeline (FFP) for RTX Remix compatibility, hooking the rendering pipeline from inside the game process.
+A `d3d9.dll` proxy that converts Fallout: New Vegas from its shader-based rendering to the fixed-function pipeline (FFP) for RTX Remix compatibility, hooking the rendering pipeline from inside the game process.
 
 **Status**: Work in progress (v0.0.4)
 
 ## What It Does
 
-Fallout: New Vegas uses vertex and pixel shaders for all geometry, which RTX Remix cannot hook. This companion plugin — built on the [`xoxor4d/remix-comp-base`](https://github.com/xoxor4d) framework and loaded into `FalloutNV.exe` via the standard `dinput8.dll` ASI mechanism — runs *inside* the game process and:
+Fallout: New Vegas uses vertex and pixel shaders for all geometry, which RTX Remix cannot hook. This companion plugin — built on the [`xoxor4d/remix-comp-base`](https://github.com/xoxor4d) framework and loaded as a `d3d9.dll` proxy that the game's import resolver picks up automatically — runs *inside* the game process and:
 
 - **Recovers world-space transforms** by reading the game's `NiDX9Renderer` singleton directly for separate World, View, and Projection matrices — no matrix inversion needed
 - **Replaces vertex and pixel shaders** with the FFP pipeline on every 3D draw call (via in-process MinHook hooks on the D3D9 device), while passing through 2D/UI content (Pip-Boy, menus) with original shaders
@@ -14,19 +14,20 @@ Fallout: New Vegas uses vertex and pixel shaders for all geometry, which RTX Rem
 - **Extracts point lights** from the game's `ShadowSceneNode` light list and submits them as `D3DLIGHT9` calls so Remix can create path-traced lights
 - **Routes sky geometry** through FFP based on `NiShadeProperty` shader type detection
 - **Drives the Remix atmosphere sun and moon** from FNV's scene-graph orientation each frame so the renderer's celestial bodies track in-game time
-- **Optionally chain-loads RTX Remix** (`d3d9_remix.dll`) and a preload side-effect DLL (e.g. SilentPatch) via `remix-comp.ini`
+- **Chain-loads RTX Remix** (`d3d9_remix.dll`) by default, with optional preload/postload DLL slots (e.g. SilentPatch) via `remix-comp.ini`
 - **Includes a debug UI** (ImGui), diagnostic frame logging, and an integrated D3D9 call tracer for offline analysis
 
 ## Installation
 
-1. Install RTX Remix runtime to the game folder
-2. (Optional) Rename Remix's `d3d9.dll` to `d3d9_remix.dll` and set `[Remix] Enabled=1` in `remix-comp.ini` if you want the comp to chain-load it
-3. Copy `dinput8.dll` into the game folder (next to `FalloutNV.exe`)
-4. Copy `remix-comp.ini` into the game folder (next to `FalloutNV.exe`) — see ini placement note below
-5. Copy the built `*-comp.asi` (e.g. `FNV-comp.asi` or `remix-comp.asi`) either next to `FalloutNV.exe` or into a `plugins/` subfolder (Ultimate ASI Loader finds it in both)
-6. Launch the game
+1. Install the **latest release of [RTX Remix Plus](https://github.com/RemixProjGroup/dxvk-remix/releases)** — this gives you Remix's `d3d9.dll`. Older Remix builds may lack required bridge entry points.
+2. **Rename Remix's `d3d9.dll` to `d3d9_remix.dll`** so it doesn't collide with this wrapper. Place it in the FNV game folder next to `FalloutNV.exe`.
+3. Copy this wrapper's `d3d9.dll` into the game folder next to `FalloutNV.exe`. Windows' loader will find our `d3d9.dll` first when the game starts, and we chain-load `d3d9_remix.dll` from there.
+4. Copy `remix-comp.ini` into the game folder next to `FalloutNV.exe`.
+5. Launch the game.
 
-> **Important — ini location:** `remix-comp.ini` is read from the **game root** (next to `FalloutNV.exe`) only. It is **not** read from `plugins/` even if you place the `.asi` there. Putting a copy next to the `.asi` is a common mistake and the plugin will silently fall back to defaults. Console output and the log file carry diagnostic info.
+> **Important — chain order:** The game folder must contain **both** `d3d9.dll` (this wrapper) and `d3d9_remix.dll` (the renamed Remix bridge). With `[Remix] Enabled=1` (default), the wrapper LoadLibrary's `d3d9_remix.dll` and forwards `Direct3DCreate9` through it. Without the renamed Remix bridge present, the wrapper silently falls back to the system `d3d9.dll` and Remix won't engage. Check console output for `[Proxy] Loaded Remix bridge: d3d9_remix.dll` to confirm.
+
+> **Important — ini location:** `remix-comp.ini` is read from the **same directory as the wrapper's `d3d9.dll`** (the game root). Console output and the log file carry diagnostic info if it can't be found.
 
 ## Configuration
 
@@ -34,9 +35,10 @@ Edit `remix-comp.ini` to adjust behaviour. Key sections:
 
 | Section | Key | Default | Description |
 |---|---|---|---|
-| `[Remix]` | `Enabled` | `0` | Chain-load RTX Remix bridge |
-| `[Remix]` | `DLLName` | `d3d9_remix.dll` | Remix bridge DLL filename |
-| `[Chain]` | `PreloadDLL` | *(empty)* | Side-effect DLL to load at startup (e.g. SilentPatch) |
+| `[Remix]` | `Enabled` | `1` | Chain-load RTX Remix bridge from `DLLName` |
+| `[Remix]` | `DLLName` | `d3d9_remix.dll` | Filename of the renamed Remix bridge DLL (placed next to our `d3d9.dll`) |
+| `[Chain]` | `Preload` | *(empty)* | Semicolon-separated DLLs/ASIs loaded before the d3d9 chain (e.g. `SilentPatch.asi`) |
+| `[Chain]` | `Postload` | *(empty)* | Semicolon-separated DLLs/ASIs loaded after the game window appears |
 | `[FFP]` | `Enabled` | `1` | FFP shader replacement |
 | `[FFP]` | `AlbedoStage` | `0` | Texture stage used as the albedo |
 | `[Lights]` | `Enabled` | `1` | Extract engine point lights for Remix |
@@ -44,7 +46,7 @@ Edit `remix-comp.ini` to adjust behaviour. Key sections:
 | `[Lights]` | `RangeMode` | `0` | Point light range: 0=Spec.r, 1=attenuation calc, 2=infinity |
 | `[SunCycle]` | `Enabled` | `1` | Drive `rtx.atmosphere.sun*` from scene-graph orientation |
 | `[MoonCycle]` | `Enabled` | `1` | Drive `rtx.atmosphere.moon0.*` from scene-graph orientation |
-| `[Culling]` | `Enabled` | `0` | Disable `BSCullingProcess` so Remix sees off-screen geometry (Wall_SoGB patch) |
+| `[CullingPatch]` | `Enabled` | `0` | Disable `BSCullingProcess` so Remix sees off-screen geometry (Wall_SoGB patch) |
 | `[Diagnostics]` | `Enabled` | `1` | Log draw-call data after `DelayMs` |
 | `[Tracer]` | `BacktraceDepth` | `8` | D3D9 call tracer call-stack depth |
 
@@ -55,22 +57,23 @@ See `remix-comp.ini` for the full set, including FNV-specific notes.
 Requires **MSVC 2022 x86** (Visual Studio 2022 with C++ desktop workload).
 
 ```bat
-build.bat                       :: Build release remix-comp.asi (default)
-build.bat debug                 :: Build debug
-build.bat release --name FNV    :: Build as FNV-comp.asi
+build.bat                       :: Build release d3d9.dll (default)
+build.bat debug                 :: Build debug d3d9.dll
+build.bat release --name FNV    :: Build release d3d9.dll with FNV-tagged PDB
 ```
 
-C++20 with PCH, statically-linked CRT (`/MT`). Links MinHook, ImGui, and the DXSDK redistributable libraries vendored under `deps/`. Output goes to `build/bin/<config>/`.
+Output is always `d3d9.dll` (linked via `d3d9.def` so it exports the standard d3d9 entry points). C++20 with PCH, statically-linked CRT (`/MT`). Links MinHook, ImGui, and the DXSDK redistributable libraries vendored under `deps/`. Output goes to `build/bin/<config>/`, along with a copy of `remix-comp.ini`.
 
 ## Project Layout
 
 ```
-src/comp/      FNV-specific code (game hooks, modules)
-src/shared/    Generic remix-comp framework (config, loader, hooking, FFP state, Remix API)
-deps/          Vendored dependencies (bridge_api, dxsdk, imgui, minhook)
-assets/        Deploy payload (dinput8.dll ASI loader, remix-comp.ini, rtx_comp textures)
-build.bat      Standalone build script (supports --name and --comp for multi-game variants)
-kb.h           Reverse-engineering knowledge base — struct layouts and function addresses for FalloutNV.exe
+src/comp/        FNV-specific code (game hooks, modules, d3d9_proxy chain loader)
+src/shared/      Generic remix-comp framework (config, loader, hooking, FFP state, Remix API)
+deps/            Vendored dependencies (bridge_api, dxsdk, imgui, minhook)
+d3d9.def         Exported d3d9 entry points — linker uses this to make the output a real d3d9.dll
+remix-comp.ini   Default configuration (copied to build output)
+build.bat        Standalone build script (supports --name and --comp for multi-game variants)
+kb.h             Reverse-engineering knowledge base — struct layouts and function addresses for FalloutNV.exe
 ```
 
 ## Known Limitations

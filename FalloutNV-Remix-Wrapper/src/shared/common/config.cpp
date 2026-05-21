@@ -50,7 +50,8 @@ namespace shared::common
 		remix.dll_name = get_string("Remix", "DLLName", "d3d9_remix.dll");
 
 		// [Chain]
-		chain.preload_dll = get_string("Chain", "PreloadDLL", "");
+		chain.preload = get_string("Chain", "Preload", "");
+		chain.postload = get_string("Chain", "Postload", "");
 
 		// [FFP]
 		ffp.enabled = get_bool("FFP", "Enabled", true);
@@ -64,8 +65,8 @@ namespace shared::common
 		// [Skinning]
 		skinning.enabled = get_bool("Skinning", "Enabled", false);
 
-		// [Culling]
-		culling.enabled = get_bool("Culling", "Enabled", false);
+		// [CullingPatch]
+		culling.enabled = get_bool("CullingPatch", "Enabled", false);
 
 		// [Lights]
 		lights.enabled = get_bool("Lights", "Enabled", true);
@@ -93,7 +94,7 @@ namespace shared::common
 		if (skinning.enabled)
 			log("Config", "Skinning ENABLED", LOG_TYPE::LOG_TYPE_WARN);
 		if (culling.enabled)
-			log("Config", "Culling ENABLED (BSCullingProcess disabled)", LOG_TYPE::LOG_TYPE_WARN);
+			log("Config", "Culling patch ENABLED (BSCullingProcess disabled)", LOG_TYPE::LOG_TYPE_WARN);
 		log("Config", std::format("Lights={} Intensity={}% RangeMode={}",
 			lights.enabled ? 1 : 0, lights.intensity_percent, lights.range_mode));
 		log("Config", std::format("SunCycle={} MoonCycle={}",
