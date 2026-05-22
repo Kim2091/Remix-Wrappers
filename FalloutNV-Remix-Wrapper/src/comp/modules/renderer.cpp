@@ -126,6 +126,20 @@ namespace comp
 			}
 		}
 
+		// PSes declaring DecalMap / Decal2Map samplers (e.g. blood splatters,
+		// dirt overlays, bullet holes) get tagged DecalStatic via RS 42 so the
+		// path tracer applies decal placement / blending. The decal-slot
+		// textures themselves aren't routed -- FFP rasterises the BaseMap only
+		// and the protocol contract has no decal nibble.
+		uint32_t category_bits = 0;
+		if (map->has(shared::common::PsSlotRole::Decal)) {
+			category_bits |= remix_protocol::category_mask(
+				remix_protocol::CategoryBit::DecalStatic);
+		}
+		if (category_bits != 0) {
+			remix_protocol::set_category_flags(dev, category_bits);
+		}
+
 		remix_protocol::set_modifier(dev,
 			remix_protocol::encode_slot_roles(diffuseSlot, normalSlot, glowSlot, heightSlot));
 		return true;
@@ -140,6 +154,19 @@ namespace comp
 	{
 		const auto* map = shared::common::g_ps_classifier.classify(ps);
 		return map && map->has(shared::common::PsSlotRole::Diffuse);
+	}
+
+	// Returns true iff the bound PS declares any LOD-prefixed sampler
+	// (LODLandNoise, LODParentNormals, LODParentTex, ...). FNV's distant-
+	// terrain shaders do serious UV math to sample an LOD atlas at s0;
+	// engaging FFP and routing s0 as raw albedo paints the entire atlas
+	// tiled across each tile. The renderer falls back to passthrough +
+	// Ignore for these so the game's actual PS produces the rasterised
+	// blend and the path tracer skips them entirely.
+	static bool ps_is_lod_shader(IDirect3DPixelShader9* ps)
+	{
+		const auto* map = shared::common::g_ps_classifier.classify(ps);
+		return map && map->has_lod_sampler;
 	}
 
 	/*
@@ -213,7 +240,9 @@ namespace comp
 			// geometry then floats with the camera. Passthrough so the
 			// rasterised output is correct, AND tag InstanceCategories::Ignore
 			// via RS 42 so Remix skips path-tracing this draw entirely.
-			if (!game::is_sky() && !ps_has_diffuse_role(ffp.last_ps()))
+			// LOD shaders take the same path: their s0 is an atlas the game's
+			// PS does UV math on, not a routable diffuse.
+			if (!game::is_sky() && (!ps_has_diffuse_role(ffp.last_ps()) || ps_is_lod_shader(ffp.last_ps())))
 			{
 				fnv_disengage(dev);
 				remix_protocol::set_category_flags(dev,
@@ -369,6 +398,26 @@ namespace comp
 			// correct, AND tag InstanceCategories::Ignore via RS 42 so Remix
 			// skips path-tracing this draw entirely.
 			if (diag) diag->route("PASS_NO_DIFFUSE_ROLE");
+			fnv_disengage(dev);
+			remix_protocol::set_category_flags(dev,
+				remix_protocol::category_mask(remix_protocol::CategoryBit::Ignore));
+			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+			remix_protocol::reset_all_slots(dev);
+			im->m_stats._drawcall_indexed_prim.track_single();
+			im->m_stats._drawcall_indexed_prim_using_vs.track_single();
+		}
+		else if (ps_is_lod_shader(ffp.last_ps()))
+		{
+			// Distant-terrain LOD shaders sample an LOD atlas / parent-tile
+			// texture at s0 with serious UV math (LODLandNoise / LODParentTex
+			// / LODParentNormals blend). The "BaseMap" label at s0 is
+			// misleading -- it's a multi-purpose LOD source, not a clean
+			// per-tile diffuse. Engaging FFP and routing s0 as raw albedo
+			// paints the entire atlas tiled across each terrain tile.
+			// Passthrough so the game's actual PS runs and produces the
+			// correct rasterised LOD blend, and tag Ignore so the path
+			// tracer skips RT capture -- rasterisation is the only output.
+			if (diag) diag->route("PASS_LOD_SHADER");
 			fnv_disengage(dev);
 			remix_protocol::set_category_flags(dev,
 				remix_protocol::category_mask(remix_protocol::CategoryBit::Ignore));

@@ -26,7 +26,8 @@ namespace shared::common
 		Normal  = 2,
 		Glow    = 3,
 		Height  = 4,
-		Count   = 5,
+		Decal   = 5,
+		Count   = 6,
 	};
 
 	// Per-PS slot-role map. slot_for_role[role] holds the D3D9 sampler stage
@@ -36,9 +37,15 @@ namespace shared::common
 	struct PsSlotMap {
 		static constexpr uint8_t kNoSlot = 0xF;
 		uint8_t slot_for_role[static_cast<size_t>(PsSlotRole::Count)] = {
-			kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot
+			kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot
 		};
 		bool any_classified = false;
+		// True iff the PS declares any sampler whose name starts with "LOD"
+		// (e.g. LODLandNoise, LODParentNormals, LODParentTex). FNV's distant-
+		// terrain shaders do serious UV math to sample an LOD atlas at s0;
+		// routing s0 as raw albedo tiles the atlas across each terrain tile.
+		// The renderer uses this to skip RT and let rasterisation handle them.
+		bool has_lod_sampler = false;
 
 		uint8_t slot(PsSlotRole role) const {
 			return slot_for_role[static_cast<size_t>(role)];
@@ -97,6 +104,11 @@ namespace shared::common
 			if (std::strcmp(name, "NormalMap") == 0)  return PsSlotRole::Normal;
 			if (std::strcmp(name, "GlowMap") == 0)    return PsSlotRole::Glow;
 			if (std::strcmp(name, "HeightMap") == 0)  return PsSlotRole::Height;
+			// Decal samplers tag the draw via RS 42 InstanceCategories::DecalStatic;
+			// the slot itself isn't routed (FFP rasterises BaseMap only), but the
+			// path tracer needs the category to apply decal placement / blending.
+			if (std::strcmp(name, "DecalMap") == 0)   return PsSlotRole::Decal;
+			if (std::strcmp(name, "Decal2Map") == 0)  return PsSlotRole::Decal;
 			return PsSlotRole::Other;
 		}
 
@@ -139,6 +151,14 @@ namespace shared::common
 				summary += std::format("s{}={}", slot, cdesc.Name ? cdesc.Name : "<null>");
 				sampler_count++;
 
+				// Detect LOD-flavoured samplers by name prefix. Independent of
+				// the semantic-role check below since LOD samplers don't map
+				// to a routing role -- they're a "this draw is distant LOD"
+				// signal for the renderer to skip RT entirely.
+				if (cdesc.Name && std::strncmp(cdesc.Name, "LOD", 3) == 0) {
+					map.has_lod_sampler = true;
+				}
+
 				if (role == PsSlotRole::Other) continue;
 
 				// First-claim wins per role. With FNV's content this is unique
@@ -159,12 +179,14 @@ namespace shared::common
 					LOG_TYPE::LOG_TYPE_DEFAULT);
 			} else {
 				log("PSReflect",
-					std::format("PS 0x{:08X} ({} samplers): {} [diff=s{} norm=s{} glow=s{} height=s{}]",
+					std::format("PS 0x{:08X} ({} samplers): {} [diff=s{} norm=s{} glow=s{} height=s{} decal=s{} lod={}]",
 						hash, sampler_count, summary,
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Diffuse)],
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Normal)],
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Glow)],
-						map.slot_for_role[static_cast<size_t>(PsSlotRole::Height)]),
+						map.slot_for_role[static_cast<size_t>(PsSlotRole::Height)],
+						map.slot_for_role[static_cast<size_t>(PsSlotRole::Decal)],
+						map.has_lod_sampler ? '1' : '0'),
 					LOG_TYPE::LOG_TYPE_GREEN);
 			}
 

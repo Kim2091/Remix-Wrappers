@@ -40,6 +40,7 @@ namespace remix_protocol {
 		WorldMatte = 1,
 		Sky = 2,
 		Ignore = 3,
+		DecalStatic = 12,
 	};
 
 	inline constexpr uint32_t category_mask(CategoryBit b) {
