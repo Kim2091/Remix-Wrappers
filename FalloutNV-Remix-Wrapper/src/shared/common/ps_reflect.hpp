@@ -25,7 +25,8 @@ namespace shared::common
 		Diffuse = 1,
 		Normal  = 2,
 		Glow    = 3,
-		Count   = 4,
+		Height  = 4,
+		Count   = 5,
 	};
 
 	// Per-PS slot-role map. slot_for_role[role] holds the D3D9 sampler stage
@@ -35,7 +36,7 @@ namespace shared::common
 	struct PsSlotMap {
 		static constexpr uint8_t kNoSlot = 0xF;
 		uint8_t slot_for_role[static_cast<size_t>(PsSlotRole::Count)] = {
-			kNoSlot, kNoSlot, kNoSlot, kNoSlot
+			kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot
 		};
 		bool any_classified = false;
 
@@ -95,6 +96,7 @@ namespace shared::common
 			if (std::strcmp(name, "TexMap") == 0)     return PsSlotRole::Diffuse;
 			if (std::strcmp(name, "NormalMap") == 0)  return PsSlotRole::Normal;
 			if (std::strcmp(name, "GlowMap") == 0)    return PsSlotRole::Glow;
+			if (std::strcmp(name, "HeightMap") == 0)  return PsSlotRole::Height;
 			return PsSlotRole::Other;
 		}
 
@@ -157,11 +159,12 @@ namespace shared::common
 					LOG_TYPE::LOG_TYPE_DEFAULT);
 			} else {
 				log("PSReflect",
-					std::format("PS 0x{:08X} ({} samplers): {} [diff=s{} norm=s{} glow=s{}]",
+					std::format("PS 0x{:08X} ({} samplers): {} [diff=s{} norm=s{} glow=s{} height=s{}]",
 						hash, sampler_count, summary,
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Diffuse)],
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Normal)],
-						map.slot_for_role[static_cast<size_t>(PsSlotRole::Glow)]),
+						map.slot_for_role[static_cast<size_t>(PsSlotRole::Glow)],
+						map.slot_for_role[static_cast<size_t>(PsSlotRole::Height)]),
 					LOG_TYPE::LOG_TYPE_GREEN);
 			}
 

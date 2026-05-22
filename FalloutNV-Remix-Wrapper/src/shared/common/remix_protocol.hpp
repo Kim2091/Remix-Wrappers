@@ -57,28 +57,34 @@ namespace remix_protocol {
 	//   bits 0-3:   diffuse slot (0..7) or 0xF if PS has no diffuse role
 	//   bits 4-7:   normal slot  (0..7) or 0xF if PS has no normal role
 	//   bits 8-11:  glow slot    (0..7) or 0xF if PS has no glow role
-	//   bits 12-15: reserved (always 0xF)
+	//   bits 12-15: height slot  (0..7) or 0xF if PS has no height role
 	//   bits 16-31: reserved (always 0)
 	//
-	// Example: PS has s0=BaseMap, s1=NormalMap          -> 0x0000_0010
-	//          PS has s0=NormalMap only                 -> 0x0000_00F0
-	//          PS has s0=BaseMap, s7=NormalMap          -> 0x0000_0070
+	// Example: PS has s0=BaseMap, s1=NormalMap          -> 0x0000_FF10
+	//          PS has s0=NormalMap only                 -> 0x0000_FFF0
+	//          PS has s0=BaseMap, s7=NormalMap          -> 0x0000_FF70
+	//          PS has s0=BaseMap, s1=NormalMap,
+	//                  s3=HeightMap                     -> 0x0000_3F10
 	//
 	// Decoded on the dxvk-remix side by setLegacyMaterialState (in
 	// d3d9_rtx_utils.cpp). A nibble of 0xF means "this role is absent for
 	// this PS"; the dxvk side then leaves that channel alone.
+	//
+	// Backwards compat note: bits 12-15 were previously hard-coded to 0xF
+	// ("reserved"). Old wrappers therefore encode kSlotAbsent in the new
+	// height nibble, which the dxvk-remix decoder interprets as "no height
+	// slot" -- no spurious height routing for pre-Height callers.
 	constexpr uint8_t kSlotAbsent = 0xF;
 
 	inline uint32_t encode_slot_roles(uint8_t diffuseSlot,
 	                                  uint8_t normalSlot,
-	                                  uint8_t glowSlot = kSlotAbsent) {
-		const uint32_t diff = static_cast<uint32_t>(diffuseSlot & 0xF);
-		const uint32_t norm = static_cast<uint32_t>(normalSlot  & 0xF);
-		const uint32_t glow = static_cast<uint32_t>(glowSlot    & 0xF);
-		// Reserved top nibble of the low half is 0xF so an all-absent payload
-		// is 0xFFFF (visually distinct in logs from the unwritten sentinel
-		// 0xfefefefe and the captured-as-zero default).
-		return diff | (norm << 4) | (glow << 8) | (0xFu << 12);
+	                                  uint8_t glowSlot   = kSlotAbsent,
+	                                  uint8_t heightSlot = kSlotAbsent) {
+		const uint32_t diff   = static_cast<uint32_t>(diffuseSlot & 0xF);
+		const uint32_t norm   = static_cast<uint32_t>(normalSlot  & 0xF);
+		const uint32_t glow   = static_cast<uint32_t>(glowSlot    & 0xF);
+		const uint32_t height = static_cast<uint32_t>(heightSlot  & 0xF);
+		return diff | (norm << 4) | (glow << 8) | (height << 12);
 	}
 
 	// Set the modifier slot. Pass 0 to clear back to "no modifiers applied";

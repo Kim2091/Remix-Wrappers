@@ -83,6 +83,7 @@ namespace comp
 		const uint8_t diffuseSlot = map->slot(shared::common::PsSlotRole::Diffuse);
 		const uint8_t normalSlot  = map->slot(shared::common::PsSlotRole::Normal);
 		const uint8_t glowSlot    = map->slot(shared::common::PsSlotRole::Glow);
+		const uint8_t heightSlot  = map->slot(shared::common::PsSlotRole::Height);
 
 		// Without a diffuse role we have nothing to override at slot 0 -- fall
 		// back to the legacy AlbedoStage heuristic and the unwritten sentinel.
@@ -109,16 +110,24 @@ namespace comp
 			}
 		}
 
-		// Glow likewise (V1 just future-proofs the payload; dxvk-remix
-		// currently ignores it).
+		// Glow likewise.
 		if (glowSlot != shared::common::PsSlotMap::kNoSlot && glowSlot != 0) {
 			if (auto* tex = ffp.cur_texture(glowSlot)) {
 				dev->SetTexture(glowSlot, tex);
 			}
 		}
 
+		// Height likewise. Same rebind pattern; dxvk-remix reads
+		// d3d9State.textures[heightSlot] and routes it into the opaque
+		// material's height channel (driving parallax-occlusion mapping).
+		if (heightSlot != shared::common::PsSlotMap::kNoSlot && heightSlot != 0) {
+			if (auto* tex = ffp.cur_texture(heightSlot)) {
+				dev->SetTexture(heightSlot, tex);
+			}
+		}
+
 		remix_protocol::set_modifier(dev,
-			remix_protocol::encode_slot_roles(diffuseSlot, normalSlot, glowSlot));
+			remix_protocol::encode_slot_roles(diffuseSlot, normalSlot, glowSlot, heightSlot));
 		return true;
 	}
 
