@@ -7,6 +7,7 @@
 #include "renderer.hpp"
 #include "tracer.hpp"
 #include "shared/common/shader_cache.hpp"
+#include "shared/common/ps_reflect.hpp"
 
 using comp::tracer;
 #include "tracer_dispatch.inc"
@@ -733,6 +734,10 @@ namespace comp
 	HRESULT d3d9ex::D3D9Device::SetPixelShader(IDirect3DPixelShader9* pShader)
 	{
 		TRACE_IF_ACTIVE(trace_SetPixelShader, pShader);
+		// Pre-populate the PS classifier cache on first sighting. The renderer
+		// queries it per draw to map (sampler name -> slot) and drive the
+		// RS-protocol payload that dxvk-remix decodes.
+		shared::common::g_ps_classifier.classify(pShader);
 		if (shared::common::ffp_state::get().on_set_pixel_shader(pShader))
 			return S_OK; // swallowed while FFP is active
 		return m_pIDirect3DDevice9->SetPixelShader(pShader);
