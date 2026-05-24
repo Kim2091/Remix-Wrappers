@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <fstream>
+
 #include "shared/common/console.hpp"
 
 namespace shared::common
@@ -46,6 +48,17 @@ namespace shared::common
 		// routing s0 as raw albedo tiles the atlas across each terrain tile.
 		// The renderer uses this to skip RT and let rasterisation handle them.
 		bool has_lod_sampler = false;
+
+		// Multi-layer terrain (PS declares BaseMap[N] for N >= 2 alongside a
+		// matching NormalMap[N] at samplers s7..s(7+N-1)). 0 means "not multi-
+		// layer terrain"; values 2-7 mean "N layers detected." See the multi-
+		// layer plan for the corresponding dxvk-remix wire format.
+		uint8_t multi_layer_count = 0;
+
+		// Set to true when BaseMap[N>=2] is declared but the matching NormalMap
+		// layout doesn't line up (different N, or NormalMap doesn't start at s7).
+		// The renderer routes ambiguous draws to Ignore + logs the mismatch.
+		bool multi_layer_ambiguous = false;
 
 		uint8_t slot(PsSlotRole role) const {
 			return slot_for_role[static_cast<size_t>(role)];
@@ -115,6 +128,41 @@ namespace shared::common
 		static PsSlotMap parse_samplers(const BYTE* bytecode, uint32_t hash) {
 			PsSlotMap map;
 
+			// Dump disassembly for the terrain-shape PSes seen in the FFPRoute
+			// diagnostic so the maintainer can read what FNV's terrain actually
+			// computes and build an FFP-equivalent stage setup. Fires once per
+			// first sighting of a target hash. Output lands next to the FNV exe.
+			// Remove the target list when no longer needed.
+			constexpr uint32_t kPsDumpTargets[] = {
+				0x47EC69D6u, // 1 sampler DiffuseMap, blend OFF, shape=TERRAIN
+				0xB1753588u, // BaseMap + s7=NormalMap, blend OFF
+				0xD9F171A4u, // BaseMap + s7=NormalMap, blend OFF
+				0x28D33296u, // BaseMap + s7=NormalMap, blend OFF
+				0x8F4BB6C0u, // BaseMap + s7=NormalMap, blend OFF
+				0xED8C1984u, // BaseMap + s7=NormalMap, blend OFF
+				0x7BE50954u, // BaseMap + s7=NormalMap, blend OFF
+				0x815B7F80u, // 1 sampler DiffuseMap, blend ON, shape=TERRAIN
+			};
+			for (uint32_t target : kPsDumpTargets) {
+				if (hash != target) continue;
+				ID3DXBuffer* disasm = nullptr;
+				HRESULT dhr = D3DXDisassembleShader(
+					reinterpret_cast<const DWORD*>(bytecode), FALSE, nullptr, &disasm);
+				if (SUCCEEDED(dhr) && disasm) {
+					const std::string path = std::format("ps_dump_{:08X}.asm", hash);
+					std::ofstream f(path, std::ios::binary);
+					if (f) {
+						f.write(static_cast<const char*>(disasm->GetBufferPointer()),
+							static_cast<std::streamsize>(disasm->GetBufferSize()));
+						log("PSReflect",
+							std::format("Dumped PS 0x{:08X} disassembly to {}", hash, path),
+							LOG_TYPE::LOG_TYPE_GREEN);
+					}
+					disasm->Release();
+				}
+				break;
+			}
+
 			ID3DXConstantTable* table = nullptr;
 			HRESULT hr = D3DXGetShaderConstantTable(
 				reinterpret_cast<const DWORD*>(bytecode), &table);
@@ -169,6 +217,42 @@ namespace shared::common
 					map.slot_for_role[idx] = static_cast<uint8_t>(slot);
 					map.any_classified = true;
 				}
+
+				// Multi-layer terrain detection: BaseMap is declared as a sampler
+				// ARRAY (RegisterCount > 1). FNV terrain convention is BaseMap[N]
+				// at s0 + NormalMap[N] at s7 -- the NormalMap alignment is validated
+				// below in a follow-up scan after the loop.
+				if (role == PsSlotRole::Diffuse && cdesc.RegisterCount > 1 && map.multi_layer_count == 0) {
+					map.multi_layer_count = static_cast<uint8_t>(cdesc.RegisterCount);
+				}
+			}
+
+			if (map.multi_layer_count > 0) {
+				// Expect NormalMap declared as ARRAY of the same count at s7.
+				// Re-scan the constant table for the NormalMap declaration.
+				bool normalAligns = false;
+				for (UINT i = 0; i < tdesc.Constants; i++) {
+					D3DXHANDLE h2 = table->GetConstant(nullptr, i);
+					if (!h2) continue;
+					D3DXCONSTANT_DESC cd = {};
+					UINT cnt = 1;
+					if (FAILED(table->GetConstantDesc(h2, &cd, &cnt))) continue;
+					if (cd.RegisterSet != D3DXRS_SAMPLER) continue;
+					if (cd.Name && std::strcmp(cd.Name, "NormalMap") == 0
+							&& cd.RegisterIndex == 7
+							&& cd.RegisterCount == map.multi_layer_count) {
+						normalAligns = true;
+						break;
+					}
+				}
+				if (!normalAligns) {
+					log("PSReflect",
+						std::format("PS 0x{:08X}: BaseMap[{}] declared but NormalMap[N] at s7 doesn't match -- multi-layer disabled, draw will be Ignored.",
+							hash, map.multi_layer_count),
+						LOG_TYPE::LOG_TYPE_WARN);
+					map.multi_layer_ambiguous = true;
+					map.multi_layer_count = 0;
+				}
 			}
 
 			table->Release();
@@ -179,14 +263,15 @@ namespace shared::common
 					LOG_TYPE::LOG_TYPE_DEFAULT);
 			} else {
 				log("PSReflect",
-					std::format("PS 0x{:08X} ({} samplers): {} [diff=s{} norm=s{} glow=s{} height=s{} decal=s{} lod={}]",
+					std::format("PS 0x{:08X} ({} samplers): {} [diff=s{} norm=s{} glow=s{} height=s{} decal=s{} lod={} mlc={}]",
 						hash, sampler_count, summary,
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Diffuse)],
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Normal)],
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Glow)],
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Height)],
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Decal)],
-						map.has_lod_sampler ? '1' : '0'),
+						map.has_lod_sampler ? '1' : '0',
+						map.multi_layer_count),
 					LOG_TYPE::LOG_TYPE_GREEN);
 			}
 

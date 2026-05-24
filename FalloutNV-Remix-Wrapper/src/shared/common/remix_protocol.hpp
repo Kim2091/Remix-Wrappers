@@ -88,6 +88,34 @@ namespace remix_protocol {
 		return diff | (norm << 4) | (glow << 8) | (height << 12);
 	}
 
+	// Multi-layer terrain extension to RS-149 modifier:
+	//   bit 16        : MULTI_LAYER_TERRAIN flag (1 = this draw is FNV multi-layer terrain)
+	//   bits 17-19    : layer count (1..7), only meaningful when bit 16 is set
+	//   bits 20-31    : reserved (must be 0)
+	//
+	// Bits 0-15 (V1 slot-role nibbles) should be set to all-kSlotAbsent (0xFFFF) when
+	// emitting multi-layer terrain, so the dxvk-remix V1 capture path doesn't pick up
+	// stale slot routing. The multi-layer capture branch reads d3d9State.textures[0..6]
+	// for albedos and [7..13] for normals directly, bypassing V1's 4-slot capture.
+	//
+	// Keep these constants in lockstep with dxvk-remix/src/dxvk/rtx_render/rtx_materials.h:
+	// kRemixMultiLayerTerrainBit / kRemixMultiLayerCountShift / kRemixMultiLayerCountMask.
+	constexpr uint32_t kRemixMultiLayerTerrainBit  = 1u << 16;
+	constexpr uint32_t kRemixMultiLayerCountShift  = 17;
+	constexpr uint32_t kRemixMultiLayerCountMask   = 0x7u;  // 3 bits, valid values 1..7
+
+	// Builds an RS-149 modifier value for a multi-layer terrain draw with `layerCount`
+	// layers (1..7). Combines: bits 0-15 = all-absent V1 nibbles (0xFFFF), bit 16 =
+	// kRemixMultiLayerTerrainBit, bits 17-19 = layerCount. Bits 20-31 stay zero.
+	// Caller responsibility to validate layerCount is in range 1..7; out-of-range
+	// values are masked to 3 bits and may produce a count of 0 which the decoder
+	// will reject.
+	inline uint32_t encode_multilayer_terrain(uint8_t layerCount) {
+		const uint32_t v1Nibbles = encode_slot_roles(kSlotAbsent, kSlotAbsent, kSlotAbsent, kSlotAbsent);
+		const uint32_t countField = (static_cast<uint32_t>(layerCount) & kRemixMultiLayerCountMask) << kRemixMultiLayerCountShift;
+		return v1Nibbles | kRemixMultiLayerTerrainBit | countField;
+	}
+
 	// Set the modifier slot. Pass 0 to clear back to "no modifiers applied";
 	// callers that wrote a modifier should follow up with reset_all_slots() at the
 	// end of the draw so the marking does not leak forward.

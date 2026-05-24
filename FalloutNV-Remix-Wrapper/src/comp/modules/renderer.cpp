@@ -145,6 +145,21 @@ namespace comp
 		return true;
 	}
 
+	// Multi-layer terrain protocol writer. Writes RS-149 with the MULTI_LAYER_TERRAIN
+	// modifier bit + layer count in bits 16-19, so dxvk-remix's setLegacyMaterialState
+	// captures all 14 sampler slots (s0..s(N-1) as albedos, s7..s(7+N-1) as normals).
+	// The caller is responsible for ensuring slots 1-13 still hold FNV's bindings —
+	// use ffp_state::setup_albedo_texture_preserve_slots, NOT setup_albedo_texture.
+	//
+	// Returns true (consistent with apply_ps_protocol's interface) so the caller pairs
+	// it with remix_protocol::reset_all_slots after the draw.
+	static bool apply_multilayer_terrain_protocol(IDirect3DDevice9* dev, uint8_t layerCount)
+	{
+		const uint32_t modifier = remix_protocol::encode_multilayer_terrain(layerCount);
+		remix_protocol::set_modifier(dev, modifier);
+		return true;
+	}
+
 	// Returns true iff the bound PS has a sampler the classifier maps to the
 	// Diffuse role. FX / normal-only / postprocess shaders return false. The
 	// FFP-engaged branches use this to decide whether to engage at all -- if
@@ -428,13 +443,16 @@ namespace comp
 		}
 		else
 		{
+			const bool is_terrain_shape = (ffp.cur_decl_has_color() && ffp.cur_decl_n_texcoords() >= 2);
+			const bool is_bi_shape = (!ffp.cur_decl_is_skinned() && ffp.cur_decl_has_blendindices());
+
 			// All world-geometry-with-normal goes through FFP. Per-decl-shape
 			// AlbedoStage logic lives inside ffp.setup_albedo_texture() — for
 			// HQ terrain / BI / multi-tile-blend shapes, it samples a non-zero
 			// stage to avoid sampling LOD-atlas leftover that gets stuck on
-			// stage 0 from prior LOD-passthrough draws.
-			const bool is_terrain_shape = (ffp.cur_decl_has_color() && ffp.cur_decl_n_texcoords() >= 2);
-			const bool is_bi_shape = (!ffp.cur_decl_is_skinned() && ffp.cur_decl_has_blendindices());
+			// stage 0 from prior LOD-passthrough draws. Multi-layer terrain
+			// flows through this same path -- one of its layer textures becomes
+			// the surface albedo and the path tracer treats it as single-layer.
 			if (diag) diag->route(is_terrain_shape ? "FFP_TERRAIN" : is_bi_shape ? "FFP_BI" : "FFP_WORLD");
 			fnv_engage(dev);
 			game::disable_skinning(dev);

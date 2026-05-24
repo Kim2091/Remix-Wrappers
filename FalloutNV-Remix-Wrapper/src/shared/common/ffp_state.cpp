@@ -310,6 +310,25 @@ namespace shared::common
 			dev->SetTexture(ts, nullptr);
 	}
 
+	void ffp_state::setup_albedo_texture_preserve_slots(IDirect3DDevice9* dev)
+	{
+		if (!dev) return;
+
+		int as = cfg_->albedo_stage;
+
+		// Same per-decl-shape AlbedoStage override as setup_albedo_texture.
+		if (cur_decl_has_color_ && cur_decl_n_texcoords_ >= 2)
+			as = cfg_->terrain_albedo_stage;
+		else if (cur_decl_has_blendindices_ && !cur_decl_is_skinned_)
+			as = cfg_->bi_albedo_stage;
+
+		auto* albedo = (as >= 0 && as < 8) ? cur_texture_[as] : cur_texture_[0];
+
+		dev->SetTexture(0, albedo);
+		// INTENTIONALLY does NOT null slots 1-7 — dxvk-remix's multi-layer
+		// capture reads d3d9State.textures[1..13] directly for albedos+normals.
+	}
+
 	void ffp_state::restore_textures(IDirect3DDevice9* dev)
 	{
 		if (!dev) return;

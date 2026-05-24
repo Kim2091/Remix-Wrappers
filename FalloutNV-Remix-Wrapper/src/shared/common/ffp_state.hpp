@@ -41,6 +41,15 @@ namespace shared::common
 		// Bind albedo texture to stage 0, NULL stages 1-7. Call before draw.
 		void setup_albedo_texture(IDirect3DDevice9* dev);
 
+		// Like setup_albedo_texture, but does NOT null slots 1-7. Used for the
+		// multi-layer terrain route in renderer.cpp where dxvk-remix needs ALL 14
+		// sampler slots intact to capture the multi-layer texture set. The albedo
+		// at slot 0 is still set per the AlbedoStage heuristic for correct FFP
+		// rasterisation, but slots 1-7 retain whatever the game bound. The wrapper
+		// pairs this with apply_multilayer_terrain_protocol + RS-149 modifier bit
+		// so dxvk-remix reads textures[0..6] as albedos and textures[7..13] as normals.
+		void setup_albedo_texture_preserve_slots(IDirect3DDevice9* dev);
+
 		// Restore original texture bindings on all 8 stages. Call after draw.
 		void restore_textures(IDirect3DDevice9* dev);
 
