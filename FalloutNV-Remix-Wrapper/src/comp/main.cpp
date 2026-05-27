@@ -43,6 +43,7 @@ namespace comp
 
 	DWORD WINAPI find_game_window([[maybe_unused]] LPVOID lpParam)
 	{
+		PROFILE_THREAD_NAME("comp-main");
 		shared::common::console();
 		std::uint32_t T = 0;
 

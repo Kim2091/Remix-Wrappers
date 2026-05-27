@@ -3,6 +3,7 @@
 
 namespace shared::common
 {
+	struct PsSlotMap;
 	/*
 	 * FFP state tracker — captures D3D9 state needed for fixed-function pipeline conversion.
 	 *
@@ -21,6 +22,13 @@ namespace shared::common
 
 		void on_set_vs_const_f(UINT start_reg, const float* data, UINT count);
 		void on_set_ps_const_f(UINT start_reg, const float* data, UINT count);
+
+		// Returns true if the write would be a no-op (cached constants already
+		// match the new data and the range has been written at least once).
+		// Used by the d3d9 proxy to skip redundant SetVSConstF / SetPSConstF
+		// calls — the game writes identical constants per-draw very heavily.
+		bool vs_const_matches(UINT start_reg, const float* data, UINT count) const;
+		bool ps_const_matches(UINT start_reg, const float* data, UINT count) const;
 		void on_set_vertex_shader(IDirect3DVertexShader9* shader);
 
 		// Returns true if the call should be swallowed (not forwarded to real device)
@@ -41,6 +49,13 @@ namespace shared::common
 		// Bind albedo texture to stage 0, NULL stages 1-7. Call before draw.
 		void setup_albedo_texture(IDirect3DDevice9* dev);
 
+		// Classifier-aware variant: skips nulling stages 1-7 for slots the
+		// caller will rebind via apply_ps_protocol (normal/glow/height roles).
+		// Also tracks the kept-bound mask so restore_textures can skip those
+		// slots — their device binding never changed. Pass nullptr to fall
+		// back to the no-arg behaviour.
+		void setup_albedo_texture(IDirect3DDevice9* dev, const PsSlotMap* psmap);
+
 		// Like setup_albedo_texture, but does NOT null slots 1-7. Used for the
 		// multi-layer terrain route in renderer.cpp where dxvk-remix needs ALL 14
 		// sampler slots intact to capture the multi-layer texture set. The albedo
@@ -52,6 +67,19 @@ namespace shared::common
 
 		// Restore original texture bindings on all 8 stages. Call after draw.
 		void restore_textures(IDirect3DDevice9* dev);
+
+		// Skinned variant of setup_texture_stages (uses ALPHAOP=SELECTARG1
+		// instead of MODULATE+DIFFUSE — the skinned vertex blend doesn't have
+		// a meaningful per-vertex alpha to combine with). Shares the tss_mode_
+		// shadow with setup_texture_stages; cross-mode entry triggers a
+		// re-program. Call from skinned draw paths.
+		void setup_texture_stages_skinned(IDirect3DDevice9* dev);
+
+		// Lighting setup (D3DRS_LIGHTING off + white material). Idempotent
+		// across consecutive draws via the ffp_setup_ flag, which already
+		// gets reset on BeginScene / device reset / shader change. Call from
+		// any FFP draw path that needs lighting state.
+		void ensure_ffp_lighting(IDirect3DDevice9* dev);
 
 		// --- Read-only accessors for renderer ---
 
@@ -79,6 +107,14 @@ namespace shared::common
 		const float* vs_const_data() const { return vs_const_; }
 		const float* ps_const_data() const { return ps_const_; }
 		const int* vs_const_write_log() const { return vs_const_write_log_; }
+
+		// The per-register write log is only consumed by the diagnostics
+		// module (frame log) and the imgui debug overlay (heatmap). The
+		// per-write fill loop in on_set_vs_const_f is ~256 writes per draw
+		// in the worst case; gate it on this flag so the hot path only pays
+		// for the two FSM sentinels (proj_start, view_start). Consumers
+		// (diagnostics::is_active / imgui overlay open) flip it on demand.
+		static inline bool vs_write_log_enabled_ = false;
 		UINT draw_call_count() const { return draw_call_count_; }
 		UINT frame_count() const { return frame_count_; }
 		UINT scene_count() const { return scene_count_; }
@@ -121,10 +157,16 @@ namespace shared::common
 		// Dirty tracking
 		bool world_dirty_ = false;
 		bool view_proj_dirty_ = false;
-		bool ps_const_dirty_ = false;
 		bool view_proj_valid_ = false;
 		bool ffp_active_ = false;
 		bool ffp_setup_ = false;
+		// TSS values differ between FFP_GEO route (ALPHAOP=MODULATE+DIFFUSE)
+		// and skinned route (ALPHAOP=SELECTARG1). Track which variant is
+		// currently programmed so consecutive same-mode draws skip the 22
+		// SetTextureStageState calls. Mode changes trigger a re-program.
+		// Reset on device loss.
+		enum class tss_mode_t : uint8_t { none, ffp_geo, skinned };
+		tss_mode_t tss_mode_ = tss_mode_t::none;
 
 		// Shader tracking
 		IDirect3DVertexShader9* last_vs_ = nullptr;
@@ -158,6 +200,29 @@ namespace shared::common
 
 		// Texture tracking
 		IDirect3DBaseTexture9* cur_texture_[8] = {};
+
+		// Bitmask of slots 1-7 that setup_albedo_texture left bound (because
+		// apply_ps_protocol will rebind them). restore_textures reads this to
+		// skip restoring those slots — their device binding is unchanged.
+		// Bit 0 unused (stage 0 always handled separately).
+		uint8_t kept_bound_mask_ = 0;
+
+		// True when setup_albedo_texture rebound stage 0 to a different
+		// texture than cur_texture_[0]; restore_textures only writes stage 0
+		// when this is true. The common HQ-terrain/BI case picks a non-zero
+		// AlbedoStage so cur_texture_[0] never gets touched and the restore
+		// is wasted.
+		bool stage0_changed_ = false;
+
+		// The pointer most recently bound at stage 0 by setup_albedo_texture
+		// (the albedo pick). apply_ps_protocol reads this to dedup its
+		// slot-0 rebind: if the picked albedo already equals the diffuse
+		// texture, the rebind is a no-op.
+		IDirect3DBaseTexture9* last_albedo_stage0_ = nullptr;
+
+	public:
+		IDirect3DBaseTexture9* last_albedo_stage0() const { return last_albedo_stage0_; }
+	private:
 
 		// Stream source tracking
 		IDirect3DVertexBuffer9* stream_vb_[4] = {};

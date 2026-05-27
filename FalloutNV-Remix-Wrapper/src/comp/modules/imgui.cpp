@@ -521,6 +521,7 @@ namespace comp
 
 	void imgui::on_present()
 	{
+		PROFILE_ZONE_N("ImGui");
 		if (auto* im = imgui::get(); im)
 		{
 			if (const auto dev = shared::globals::d3d_device; dev)

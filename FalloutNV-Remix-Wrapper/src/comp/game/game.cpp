@@ -86,6 +86,7 @@ namespace comp::game
 
 	void apply_transforms(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("game::apply_transforms");
 		float* world = get_renderer_matrix(RENDERER_WORLD_OFF);
 		float* view  = get_renderer_matrix(RENDERER_VIEW_OFF);
 		float* proj  = get_renderer_matrix(RENDERER_PROJ_OFF);
@@ -105,6 +106,7 @@ namespace comp::game
 
 	void init_backbuffer_tracking(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("game::init_backbuffer_tracking");
 		IDirect3DSurface9* bb = nullptr;
 		if (SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb)
 		{
@@ -122,6 +124,7 @@ namespace comp::game
 
 	void on_set_render_target(IDirect3DDevice9* /*dev*/, DWORD idx, IDirect3DSurface9* surface)
 	{
+		PROFILE_ZONE_N("game::on_set_render_target");
 		if (idx != 0 || !surface) return;
 
 		D3DSURFACE_DESC desc;
@@ -138,6 +141,7 @@ namespace comp::game
 
 	void update_lights(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("game::update_lights");
 		if (!lights_enabled || lights_updated_frame) return;
 		if (!shadow_scene_node_ptr) return;
 
@@ -306,6 +310,7 @@ namespace comp::game
 
 	void disable_skinning(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("game::disable_skinning");
 		if (skinning_setup)
 		{
 			dev->SetRenderState(D3DRS_INDEXEDVERTEXBLENDENABLE, FALSE);
@@ -318,6 +323,7 @@ namespace comp::game
 		D3DPRIMITIVETYPE pt, INT base_vtx, UINT min_vtx, UINT num_verts,
 		UINT start_idx, UINT prim_count)
 	{
+		PROFILE_ZONE_N("game::draw_skinned_dip");
 		auto& ffp = shared::common::ffp_state::get();
 
 		if (num_bones <= 0)
@@ -350,39 +356,16 @@ namespace comp::game
 			dev->SetTransform(D3DTS_PROJECTION, reinterpret_cast<const D3DMATRIX*>(proj));
 		}
 
-		// Setup FFP rendering state
-		{
-			// Texture stages
-			dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
-			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
-			dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_CURRENT);
-			dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
-			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
-			dev->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
-			dev->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
-			for (DWORD s = 1; s <= 7; s++)
-			{
-				dev->SetTextureStageState(s, D3DTSS_COLOROP, D3DTOP_DISABLE);
-				dev->SetTextureStageState(s, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
-			}
-
-			// Lighting
-			dev->SetRenderState(D3DRS_LIGHTING, FALSE);
-			D3DMATERIAL9 mat = {};
-			mat.Diffuse = { 1.0f, 1.0f, 1.0f, 1.0f };
-			mat.Ambient = { 1.0f, 1.0f, 1.0f, 1.0f };
-			dev->SetMaterial(&mat);
-		}
+		// Shared shadow with FFP_GEO path: TSS (skinned variant) + lighting +
+		// albedo texture set all go through ffp_state, which skips redundant
+		// writes when consecutive draws share state. Cuts ~25-30 D3D9 calls
+		// per skinned draw down to near zero on typical batches.
+		ffp.setup_texture_stages_skinned(dev);
+		ffp.ensure_ffp_lighting(dev);
 
 		upload_bones(dev);
 
-		// Albedo to stage 0, NULL stages 1-7
-		auto& cfg = shared::common::config::get().ffp;
-		int as = cfg.albedo_stage;
-		auto* albedo = (as >= 0 && as < 8) ? ffp.cur_texture(as) : ffp.cur_texture(0);
-		dev->SetTexture(0, albedo);
-		for (DWORD ts = 1; ts < 8; ts++)
-			dev->SetTexture(ts, nullptr);
+		ffp.setup_albedo_texture(dev);
 
 		// Bind cloned declaration (UBYTE4 BLENDINDICES), keep original VB
 		dev->SetVertexDeclaration(cloned_decl);
@@ -406,6 +389,7 @@ namespace comp::game
 
 	void on_set_vs_const_f(IDirect3DDevice9* dev, [[maybe_unused]] UINT start_reg, const float* data, UINT count)
 	{
+		PROFILE_ZONE_N("game::on_set_vs_const_f");
 		constexpr int REGS_PER_BONE = 3;
 
 		if (count != REGS_PER_BONE) return;
@@ -452,6 +436,7 @@ namespace comp::game
 
 	void release_skin_cache()
 	{
+		PROFILE_ZONE_N("game::release_skin_cache");
 		for (int i = 0; i < skin_decl_count; i++)
 		{
 			if (skin_decl_clone[i])

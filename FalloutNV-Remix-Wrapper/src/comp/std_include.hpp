@@ -62,6 +62,7 @@ constexpr auto COMP_MOD_VERSION_PATCH = 1;
 #include "../shared/utils/memory.hpp"
 #include "../shared/common/console.hpp"
 #include "../shared/common/loader.hpp"
+#include "../shared/common/profiler.hpp"
 #include "game/structs.hpp"
 #include "game/game.hpp"
 #include "comp.hpp"

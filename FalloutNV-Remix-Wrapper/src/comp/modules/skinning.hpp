@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 namespace comp
 {
 	/*
@@ -34,6 +36,12 @@ namespace comp
 		// Called on device reset
 		void on_reset();
 
+		// Called once per frame from Present, after plot read.
+		void on_present();
+
+		// Number of expanded-VB cache misses this frame. Used by the Tracy plot.
+		int expansions_this_frame() const { return expansions_this_frame_.load(std::memory_order_relaxed); }
+
 	private:
 		static constexpr int SKIN_VTX_SIZE = 48;
 		static constexpr int SKIN_CACHE_SIZE = 64;
@@ -46,6 +54,8 @@ namespace comp
 		unsigned int skin_exp_nv_[SKIN_CACHE_SIZE] = {};
 
 		bool initialized_ = false;
+
+		std::atomic<int> expansions_this_frame_{0};
 
 		void create_expanded_decl(IDirect3DDevice9* dev);
 		void release_cache();

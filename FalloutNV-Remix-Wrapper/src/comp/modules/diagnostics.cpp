@@ -194,6 +194,11 @@ namespace comp
 			was_pressed = pressed;
 		}
 
+		// Drive the per-register VS write-log fill from the per-frame
+		// is_active() decision. on_set_vs_const_f's hot loop pays nothing
+		// when no one's looking.
+		shared::common::ffp_state::vs_write_log_enabled_ = is_active();
+
 		if (!is_active()) return;
 
 		auto& ffp = shared::common::ffp_state::get();

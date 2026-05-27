@@ -121,6 +121,7 @@ namespace comp
 
 	void tracer::on_present()
 	{
+		PROFILE_ZONE_N("Tracer");
 		if (!capturing_) return;
 
 		flush_buffer();

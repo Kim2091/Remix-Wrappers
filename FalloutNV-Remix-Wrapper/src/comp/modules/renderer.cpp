@@ -74,10 +74,9 @@ namespace comp
 	 * Returns true if the protocol was written (caller must follow up with
 	 * remix_protocol::reset_all_slots after the draw).
 	 */
-	static bool apply_ps_protocol(IDirect3DDevice9* dev)
+	static bool apply_ps_protocol(IDirect3DDevice9* dev, const shared::common::PsSlotMap* map)
 	{
 		auto& ffp = shared::common::ffp_state::get();
-		const auto* map = shared::common::g_ps_classifier.classify(ffp.last_ps());
 		if (!map || !map->any_classified) return false;
 
 		const uint8_t diffuseSlot = map->slot(shared::common::PsSlotRole::Diffuse);
@@ -93,38 +92,21 @@ namespace comp
 		// normal-channel routing for it either. V1 limitation.)
 		if (diffuseSlot == shared::common::PsSlotMap::kNoSlot) return false;
 
-		// Rebind slot 0 to the actual diffuse texture (might already match
-		// what setup_albedo_texture picked; SetTexture is idempotent).
+		// Rebind slot 0 to the actual diffuse texture. setup_albedo_texture
+		// may already have bound this exact pointer via the AlbedoStage
+		// heuristic (e.g. when diffuseSlot matches the picked stage, or the
+		// same texture is bound at two slots) -- skip the redundant write.
 		if (auto* tex = ffp.cur_texture(diffuseSlot)) {
-			dev->SetTexture(0, tex);
-		}
-
-		// Restore the normal-map binding at its original stage so dxvk can
-		// read d3d9State.textures[normalSlot] in setLegacyMaterialState.
-		// setup_albedo_texture() already NULLed slots 1-7, so we re-bind here.
-		// (If normalSlot is 0 -- shaders that pack normal-only into s0 -- the
-		// rebind above already handled it.)
-		if (normalSlot != shared::common::PsSlotMap::kNoSlot && normalSlot != 0) {
-			if (auto* tex = ffp.cur_texture(normalSlot)) {
-				dev->SetTexture(normalSlot, tex);
+			if (tex != ffp.last_albedo_stage0()) {
+				dev->SetTexture(0, tex);
 			}
 		}
 
-		// Glow likewise.
-		if (glowSlot != shared::common::PsSlotMap::kNoSlot && glowSlot != 0) {
-			if (auto* tex = ffp.cur_texture(glowSlot)) {
-				dev->SetTexture(glowSlot, tex);
-			}
-		}
-
-		// Height likewise. Same rebind pattern; dxvk-remix reads
-		// d3d9State.textures[heightSlot] and routes it into the opaque
-		// material's height channel (driving parallax-occlusion mapping).
-		if (heightSlot != shared::common::PsSlotMap::kNoSlot && heightSlot != 0) {
-			if (auto* tex = ffp.cur_texture(heightSlot)) {
-				dev->SetTexture(heightSlot, tex);
-			}
-		}
+		// setup_albedo_texture(dev, psmap) skipped the null-write for these
+		// slots (they're in the kept-bound mask), so the device already holds
+		// the correct texture. No rebind needed. The (slot != 0) guard remains
+		// to skip shaders that pack normal-only into s0 -- those got rebound
+		// above via the diffuse path.
 
 		// PSes declaring DecalMap / Decal2Map samplers (e.g. blood splatters,
 		// dirt overlays, bullet holes) get tagged DecalStatic via RS 42 so the
@@ -165,9 +147,8 @@ namespace comp
 	// FFP-engaged branches use this to decide whether to engage at all -- if
 	// there's no albedo to bind at slot 0, engaging FFP would paint whatever
 	// the game had at slot 0 (often a normal map) as the surface colour.
-	static bool ps_has_diffuse_role(IDirect3DPixelShader9* ps)
+	static bool ps_has_diffuse_role(const shared::common::PsSlotMap* map)
 	{
-		const auto* map = shared::common::g_ps_classifier.classify(ps);
 		return map && map->has(shared::common::PsSlotRole::Diffuse);
 	}
 
@@ -178,11 +159,18 @@ namespace comp
 	// tiled across each tile. The renderer falls back to passthrough +
 	// Ignore for these so the game's actual PS produces the rasterised
 	// blend and the path tracer skips them entirely.
-	static bool ps_is_lod_shader(IDirect3DPixelShader9* ps)
+	static bool ps_is_lod_shader(const shared::common::PsSlotMap* map)
 	{
-		const auto* map = shared::common::g_ps_classifier.classify(ps);
 		return map && map->has_lod_sampler;
 	}
+
+	// Track whether the device's WORLD matrix is currently identity, so
+	// back-to-back passthrough draws skip the redundant SetTransform.
+	// fnv_engage clears it (game::apply_transforms writes a non-identity
+	// WORLD); device reset re-asserts identity (D3D9 default).
+	static bool s_world_is_identity_ = true;
+
+	void renderer_on_reset() { s_world_is_identity_ = true; }
 
 	/*
 	 * FNV-specific FFP engage: uses NiDX9Renderer matrices instead of VS constants.
@@ -194,6 +182,7 @@ namespace comp
 		auto& ffp = shared::common::ffp_state::get();
 		ffp.engage(dev);
 		game::apply_transforms(dev);
+		s_world_is_identity_ = false;
 
 		// FNV: alpha straight from texture (SELECTARG1), not modulated with vertex diffuse.
 		// Preserves alpha channel for foliage/cutout transparency.
@@ -209,7 +198,11 @@ namespace comp
 		auto& ffp = shared::common::ffp_state::get();
 		game::disable_skinning(dev);
 		ffp.disengage(dev);
-		dev->SetTransform(D3DTS_WORLD, &shared::globals::IDENTITY);
+		if (!s_world_is_identity_)
+		{
+			dev->SetTransform(D3DTS_WORLD, &shared::globals::IDENTITY);
+			s_world_is_identity_ = true;
+		}
 	}
 
 
@@ -217,6 +210,7 @@ namespace comp
 
 	HRESULT renderer::on_draw_primitive(IDirect3DDevice9* dev, const D3DPRIMITIVETYPE& PrimitiveType, const UINT& StartVertex, const UINT& PrimitiveCount)
 	{
+		PROFILE_ZONE();
 		if (!g_rendered_first_primitive) {
 			g_rendered_first_primitive = true;
 		}
@@ -247,6 +241,9 @@ namespace comp
 			ffp.last_decl() && !ffp.cur_decl_has_pos_t() && !ffp.cur_decl_is_skinned() &&
 			(ffp.cur_decl_has_normal() || game::is_sky()) && !game::is_2d())
 		{
+			// One classifier lookup per draw, shared across all helpers below.
+			const auto* psmap = shared::common::g_ps_classifier.classify(ffp.last_ps());
+
 			// Non-sky draws whose PS has no diffuse role identified are FX /
 			// normal-only / environment-cubemap shaders; engaging FFP would
 			// paint slot 0 (often a normal map) as the surface colour, and
@@ -257,7 +254,7 @@ namespace comp
 			// via RS 42 so Remix skips path-tracing this draw entirely.
 			// LOD shaders take the same path: their s0 is an atlas the game's
 			// PS does UV math on, not a routable diffuse.
-			if (!game::is_sky() && (!ps_has_diffuse_role(ffp.last_ps()) || ps_is_lod_shader(ffp.last_ps())))
+			if (!game::is_sky() && (!ps_has_diffuse_role(psmap) || ps_is_lod_shader(psmap)))
 			{
 				fnv_disengage(dev);
 				remix_protocol::set_category_flags(dev,
@@ -270,11 +267,14 @@ namespace comp
 			else
 			{
 				fnv_engage(dev);
-				ffp.setup_albedo_texture(dev);
+				// Sky draws skip the PS-classifier protocol; passing null to
+				// setup_albedo_texture nulls all slots 1-7 like legacy behaviour,
+				// matching apply_ps_protocol being a no-op for the sky branch.
+				ffp.setup_albedo_texture(dev, game::is_sky() ? nullptr : psmap);
 
 				// Sky draws don't have a normal map (cubemap / atmosphere only);
 				// skip the PS-classifier override so dxvk sees the legacy path.
-				const bool wrote_protocol = !game::is_sky() && apply_ps_protocol(dev);
+				const bool wrote_protocol = !game::is_sky() && apply_ps_protocol(dev, psmap);
 				hr = dev->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
 				if (wrote_protocol) {
 					remix_protocol::reset_all_slots(dev);
@@ -302,12 +302,13 @@ namespace comp
 
 	HRESULT renderer::on_draw_indexed_prim(IDirect3DDevice9* dev, const D3DPRIMITIVETYPE& PrimitiveType, const INT& BaseVertexIndex, const UINT& MinVertexIndex, const UINT& NumVertices, const UINT& startIndex, const UINT& primCount)
 	{
+		PROFILE_ZONE();
 		if (!is_initialized() || shared::globals::imgui_is_rendering) {
 			return dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
 		}
 
 		auto& ctx = setup_context(dev);
-		const auto im = imgui::get();
+		static auto im = imgui::get();
 		auto& ffp = shared::common::ffp_state::get();
 		ffp.increment_draw_count();
 
@@ -343,6 +344,7 @@ namespace comp
 
 		if (!game::rendering_to_backbuffer)
 		{
+			PROFILE_ZONE_N("route_PASS_OFFSCREEN_RT");
 			if (diag) diag->route("PASS_OFFSCREEN_RT");
 			fnv_disengage(dev);
 			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
@@ -351,6 +353,7 @@ namespace comp
 		}
 		else if (!ffp.is_enabled() || !ffp.view_proj_valid())
 		{
+			PROFILE_ZONE_N("route_PASS_NO_VP");
 			if (diag) diag->route("PASS_NO_VP");
 			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
 			im->m_stats._drawcall_indexed_prim.track_single();
@@ -358,6 +361,7 @@ namespace comp
 		}
 		else if (game::is_2d())
 		{
+			PROFILE_ZONE_N("route_PASS_2D");
 			if (diag) diag->route("PASS_2D");
 			fnv_disengage(dev);
 			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
@@ -366,6 +370,7 @@ namespace comp
 		}
 		else if (ffp.cur_decl_is_skinned())
 		{
+			PROFILE_ZONE_N("route_SKINNED");
 			if (diag) diag->route("SKINNED");
 			// Skinned draws use a separate dispatch path with its own texture
 			// setup; the slot-1 binding is unclear here, so don't claim normal-
@@ -376,6 +381,7 @@ namespace comp
 		}
 		else if (ffp.cur_decl_has_pos_t())
 		{
+			PROFILE_ZONE_N("route_PASS_POSTT");
 			if (diag) diag->route("PASS_POSTT");
 			fnv_disengage(dev);
 			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
@@ -384,6 +390,7 @@ namespace comp
 		}
 		else if (game::is_sky())
 		{
+			PROFILE_ZONE_N("route_FFP_SKY");
 			if (diag) diag->route("FFP_SKY");
 			fnv_engage(dev);
 			game::disable_skinning(dev);
@@ -396,79 +403,90 @@ namespace comp
 		}
 		else if (!ffp.cur_decl_has_normal())
 		{
+			PROFILE_ZONE_N("route_PASS_NO_NORMAL");
 			if (diag) diag->route("PASS_NO_NORMAL");
 			fnv_disengage(dev);
 			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
 			im->m_stats._drawcall_indexed_prim.track_single();
 			im->m_stats._drawcall_indexed_prim_using_vs.track_single();
 		}
-		else if (!ps_has_diffuse_role(ffp.last_ps()))
-		{
-			// FX / normal-only / environment-cubemap / postprocess shaders
-			// that don't expose an albedo sampler. Engaging FFP would bind
-			// slot 0 (often the normal map) as the surface colour, and pure
-			// passthrough leaves Remix unable to recover a world transform
-			// from the game's programmable VS -- the captured geometry then
-			// floats with the camera. Passthrough so the rasterised output is
-			// correct, AND tag InstanceCategories::Ignore via RS 42 so Remix
-			// skips path-tracing this draw entirely.
-			if (diag) diag->route("PASS_NO_DIFFUSE_ROLE");
-			fnv_disengage(dev);
-			remix_protocol::set_category_flags(dev,
-				remix_protocol::category_mask(remix_protocol::CategoryBit::Ignore));
-			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
-			remix_protocol::reset_all_slots(dev);
-			im->m_stats._drawcall_indexed_prim.track_single();
-			im->m_stats._drawcall_indexed_prim_using_vs.track_single();
-		}
-		else if (ps_is_lod_shader(ffp.last_ps()))
-		{
-			// Distant-terrain LOD shaders sample an LOD atlas / parent-tile
-			// texture at s0 with serious UV math (LODLandNoise / LODParentTex
-			// / LODParentNormals blend). The "BaseMap" label at s0 is
-			// misleading -- it's a multi-purpose LOD source, not a clean
-			// per-tile diffuse. Engaging FFP and routing s0 as raw albedo
-			// paints the entire atlas tiled across each terrain tile.
-			// Passthrough so the game's actual PS runs and produces the
-			// correct rasterised LOD blend, and tag Ignore so the path
-			// tracer skips RT capture -- rasterisation is the only output.
-			if (diag) diag->route("PASS_LOD_SHADER");
-			fnv_disengage(dev);
-			remix_protocol::set_category_flags(dev,
-				remix_protocol::category_mask(remix_protocol::CategoryBit::Ignore));
-			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
-			remix_protocol::reset_all_slots(dev);
-			im->m_stats._drawcall_indexed_prim.track_single();
-			im->m_stats._drawcall_indexed_prim_using_vs.track_single();
-		}
 		else
 		{
-			const bool is_terrain_shape = (ffp.cur_decl_has_color() && ffp.cur_decl_n_texcoords() >= 2);
-			const bool is_bi_shape = (!ffp.cur_decl_is_skinned() && ffp.cur_decl_has_blendindices());
+			// One classifier lookup per FFP-candidate draw, shared across the
+			// no-diffuse / LOD / FFP_GEO branches below (was 2-3 lookups before).
+			const auto* psmap = shared::common::g_ps_classifier.classify(ffp.last_ps());
 
-			// All world-geometry-with-normal goes through FFP. Per-decl-shape
-			// AlbedoStage logic lives inside ffp.setup_albedo_texture() — for
-			// HQ terrain / BI / multi-tile-blend shapes, it samples a non-zero
-			// stage to avoid sampling LOD-atlas leftover that gets stuck on
-			// stage 0 from prior LOD-passthrough draws. Multi-layer terrain
-			// flows through this same path -- one of its layer textures becomes
-			// the surface albedo and the path tracer treats it as single-layer.
-			if (diag) diag->route(is_terrain_shape ? "FFP_TERRAIN" : is_bi_shape ? "FFP_BI" : "FFP_WORLD");
-			fnv_engage(dev);
-			game::disable_skinning(dev);
-			ffp.setup_albedo_texture(dev);
-
-			// PS-classifier drives slot-0 rebind + normal-map slot preservation
-			// + RS 149 protocol payload. Always succeeds at this point because
-			// the ps_has_diffuse_role gate above already filtered out the
-			// no-diffuse cases.
-			const bool wrote_protocol = apply_ps_protocol(dev);
-			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
-			if (wrote_protocol) {
+			if (!ps_has_diffuse_role(psmap))
+			{
+				// FX / normal-only / environment-cubemap / postprocess shaders
+				// that don't expose an albedo sampler. Engaging FFP would bind
+				// slot 0 (often the normal map) as the surface colour, and pure
+				// passthrough leaves Remix unable to recover a world transform
+				// from the game's programmable VS -- the captured geometry then
+				// floats with the camera. Passthrough so the rasterised output is
+				// correct, AND tag InstanceCategories::Ignore via RS 42 so Remix
+				// skips path-tracing this draw entirely.
+				PROFILE_ZONE_N("route_PASS_NO_DIFFUSE_ROLE");
+				if (diag) diag->route("PASS_NO_DIFFUSE_ROLE");
+				fnv_disengage(dev);
+				remix_protocol::set_category_flags(dev,
+					remix_protocol::category_mask(remix_protocol::CategoryBit::Ignore));
+				hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
 				remix_protocol::reset_all_slots(dev);
+				im->m_stats._drawcall_indexed_prim.track_single();
+				im->m_stats._drawcall_indexed_prim_using_vs.track_single();
 			}
-			ffp.restore_textures(dev);
-			im->m_stats._drawcall_indexed_prim.track_single();
+			else if (ps_is_lod_shader(psmap))
+			{
+				// Distant-terrain LOD shaders sample an LOD atlas / parent-tile
+				// texture at s0 with serious UV math (LODLandNoise / LODParentTex
+				// / LODParentNormals blend). The "BaseMap" label at s0 is
+				// misleading -- it's a multi-purpose LOD source, not a clean
+				// per-tile diffuse. Engaging FFP and routing s0 as raw albedo
+				// paints the entire atlas tiled across each terrain tile.
+				// Passthrough so the game's actual PS runs and produces the
+				// correct rasterised LOD blend, and tag Ignore so the path
+				// tracer skips RT capture -- rasterisation is the only output.
+				PROFILE_ZONE_N("route_PASS_LOD_SHADER");
+				if (diag) diag->route("PASS_LOD_SHADER");
+				fnv_disengage(dev);
+				remix_protocol::set_category_flags(dev,
+					remix_protocol::category_mask(remix_protocol::CategoryBit::Ignore));
+				hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+				remix_protocol::reset_all_slots(dev);
+				im->m_stats._drawcall_indexed_prim.track_single();
+				im->m_stats._drawcall_indexed_prim_using_vs.track_single();
+			}
+			else
+			{
+				PROFILE_ZONE_N("route_FFP_GEO");
+				const bool is_terrain_shape = (ffp.cur_decl_has_color() && ffp.cur_decl_n_texcoords() >= 2);
+				const bool is_bi_shape = (!ffp.cur_decl_is_skinned() && ffp.cur_decl_has_blendindices());
+
+				// All world-geometry-with-normal goes through FFP. Per-decl-shape
+				// AlbedoStage logic lives inside ffp.setup_albedo_texture() — for
+				// HQ terrain / BI / multi-tile-blend shapes, it samples a non-zero
+				// stage to avoid sampling LOD-atlas leftover that gets stuck on
+				// stage 0 from prior LOD-passthrough draws. Multi-layer terrain
+				// flows through this same path -- one of its layer textures becomes
+				// the surface albedo and the path tracer treats it as single-layer.
+				if (diag) diag->route(is_terrain_shape ? "FFP_TERRAIN" : is_bi_shape ? "FFP_BI" : "FFP_WORLD");
+				fnv_engage(dev);
+				game::disable_skinning(dev);
+				ffp.setup_albedo_texture(dev, psmap);
+
+				// PS-classifier drives slot-0 rebind + normal-map slot preservation
+				// + RS 149 protocol payload. Always succeeds at this point because
+				// the ps_has_diffuse_role gate above already filtered out the
+				// no-diffuse cases.
+				const bool wrote_protocol = apply_ps_protocol(dev, psmap);
+				hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+				if (wrote_protocol) {
+					remix_protocol::reset_all_slots(dev);
+				}
+				ffp.restore_textures(dev);
+				im->m_stats._drawcall_indexed_prim.track_single();
+			}
 		}
 
 		ctx.restore_all(dev);
@@ -481,6 +499,7 @@ namespace comp
 
 	void renderer::manually_trigger_remix_injection(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE();
 		if (!m_triggered_remix_injection)
 		{
 			auto& ctx = dc_ctx;

@@ -27,6 +27,8 @@ namespace comp
 		D3DPRIMITIVETYPE pt, INT base_vtx, UINT min_vtx, UINT num_verts,
 		UINT start_idx, UINT prim_count)
 	{
+		PROFILE_ZONE();
+
 		auto& ffp = shared::common::ffp_state::get();
 
 		// Create expanded declaration on first use
@@ -82,10 +84,17 @@ namespace comp
 			skin_exp_decl_->Release();
 			skin_exp_decl_ = nullptr;
 		}
+		expansions_this_frame_.store(0, std::memory_order_relaxed);
+	}
+
+	void skinning::on_present()
+	{
+		expansions_this_frame_.store(0, std::memory_order_relaxed);
 	}
 
 	void skinning::create_expanded_decl(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("skin::create_expanded_decl");
 		// Expanded skinned vertex layout: FLOAT3 pos + FLOAT3 weights + UBYTE4 idx + FLOAT3 normal + FLOAT2 uv
 		D3DVERTEXELEMENT9 elems[] = {
 			{ 0,  0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
@@ -122,6 +131,7 @@ namespace comp
 	IDirect3DVertexBuffer9* skinning::get_expanded_vb(IDirect3DDevice9* dev,
 		IDirect3DVertexBuffer9* src_vb, INT base_vtx, UINT num_verts, UINT stride)
 	{
+		PROFILE_ZONE_N("skin::get_expanded_vb");
 		if (!src_vb || stride == 0 || num_verts == 0) return nullptr;
 
 		// Hash: src_vb pointer + base_vtx + num_verts + stride
@@ -142,6 +152,8 @@ namespace comp
 			skin_exp_vb_[slot]->Release();
 			skin_exp_vb_[slot] = nullptr;
 		}
+
+		expansions_this_frame_.fetch_add(1, std::memory_order_relaxed);
 
 		// Lock source VB
 		unsigned char* src_data = nullptr;
@@ -182,6 +194,7 @@ namespace comp
 
 	void skinning::expand_skin_vertex(unsigned char* dst, const unsigned char* src, UINT /*stride*/)
 	{
+		PROFILE_ZONE_N("skin::expand_skin_vertex");
 		auto& ffp = shared::common::ffp_state::get();
 		auto* out = reinterpret_cast<float*>(dst);
 
@@ -255,6 +268,7 @@ namespace comp
 
 	void skinning::upload_bones(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("skin::upload_bones");
 		auto& ffp = shared::common::ffp_state::get();
 		auto& cfg = shared::common::config::get().ffp;
 
@@ -300,6 +314,7 @@ namespace comp
 
 	void skinning::disable_skinning(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("skin::disable_skinning");
 		dev->SetRenderState(D3DRS_VERTEXBLEND, D3DVBF_DISABLE);
 		dev->SetRenderState(D3DRS_INDEXEDVERTEXBLENDENABLE, FALSE);
 	}

@@ -4,6 +4,10 @@ namespace comp
 {
 	extern bool g_rendered_first_primitive;
 
+	// Resets renderer-side cached device state (WORLD=identity shadow) on
+	// device loss. Called from d3d9ex Reset alongside ffp_state::on_reset.
+	void renderer_on_reset();
+
 	namespace tex_addons
 	{
 		extern bool initialized;
@@ -37,6 +41,7 @@ namespace comp
 			{
 				device->SetTransform(D3DTS_TEXTURE0, matrix);
 				tex0_transform_set_ = true;
+				dirty_ = true;
 			}
 		}
 
@@ -45,6 +50,7 @@ namespace comp
 		{
 			device->GetVertexShader(&vs_);
 			vs_set_ = true;
+			dirty_ = true;
 		}
 
 		// save vertex shader
@@ -52,6 +58,7 @@ namespace comp
 		{
 			device->GetPixelShader(&ps_);
 			ps_set_ = true;
+			dirty_ = true;
 		}
 
 		// save texture at stage 0 or 1
@@ -67,6 +74,7 @@ namespace comp
 
 				device->GetTexture(0, &tex0_);
 				tex0_set_ = true;
+				dirty_ = true;
 			}
 			else
 			{
@@ -78,6 +86,7 @@ namespace comp
 
 				device->GetTexture(1, &tex1_);
 				tex1_set_ = true;
+				dirty_ = true;
 			}
 		}
 
@@ -91,6 +100,7 @@ namespace comp
 			DWORD temp;
 			device->GetRenderState(state, &temp);
 			saved_render_state_[state] = temp;
+			dirty_ = true;
 			return true;
 		}
 
@@ -109,6 +119,7 @@ namespace comp
 			DWORD temp;
 			device->GetSamplerState(0, state, &temp);
 			saved_sampler_state_[state] = temp;
+			dirty_ = true;
 		}
 
 		// save texture stage 0 state (e.g. D3DTSS_ALPHAARG1) - returns false if tss was previously saved
@@ -121,6 +132,7 @@ namespace comp
 			DWORD temp;
 			device->GetTextureStageState(0, type, &temp);
 			saved_texture_stage_state_[type] = temp;
+			dirty_ = true;
 			return true;
 		}
 
@@ -129,6 +141,7 @@ namespace comp
 		{
 			device->GetTransform(D3DTS_VIEW, &view_transform_);
 			view_transform_set_ = true;
+			dirty_ = true;
 		}
 
 		// save D3DTS_PROJECTION
@@ -136,6 +149,7 @@ namespace comp
 		{
 			device->GetTransform(D3DTS_PROJECTION, &projection_transform_);
 			projection_transform_set_ = true;
+			dirty_ = true;
 		}
 
 		// restore vertex shader
@@ -233,6 +247,8 @@ namespace comp
 		// restore all changes
 		void restore_all(IDirect3DDevice9* device)
 		{
+			if (!dirty_) return;
+
 			restore_vs(device);
 			restore_ps(device);
 			restore_texture(device, 0);
@@ -257,6 +273,11 @@ namespace comp
 		// reset the stored context data
 		void reset_context()
 		{
+			modifiers.reset();
+			info.reset();
+
+			if (!dirty_) return;
+
 			vs_ = nullptr; vs_set_ = false;
 			ps_ = nullptr; ps_set_ = false;
 			tex0_ = nullptr; tex0_set_ = false;
@@ -267,8 +288,7 @@ namespace comp
 			saved_render_state_.clear();
 			saved_sampler_state_.clear();
 			saved_texture_stage_state_.clear();
-			modifiers.reset();
-			info.reset();
+			dirty_ = false;
 		}
 
 		struct modifiers_s
@@ -306,6 +326,11 @@ namespace comp
 		drawcall_mod_context() = default;
 
 	private:
+		// Set by every save_* / set_texture_transform mutation. restore_all
+		// and reset_context early-return when false so the empty-map hot path
+		// skips iterating and clearing three unordered_maps every draw.
+		bool dirty_ = false;
+
 		// Render states to save
 		IDirect3DVertexShader9* vs_ = nullptr;
 		IDirect3DPixelShader9* ps_ = nullptr;

@@ -123,15 +123,15 @@ namespace remix_protocol {
 		dev->SetRenderState(kRsModifier, modifierMask);
 	}
 
-	// Reset all 5 protocol slots to the sentinel value, so the next draw the
-	// wrapper does not explicitly mark will fall through to Remix's default
-	// (non-protocol) behaviour. Call after every protocol-written draw.
+	// Reset the protocol slots the wrapper actually writes (CategoryFlags +
+	// Modifier) back to the sentinel so the next un-marked draw falls through
+	// to Remix's default (non-protocol) behaviour. kRsHashOverride /
+	// kRsTempFloat01 / kRsTempFloat02 have no writers in this wrapper; they
+	// never leave the device default and don't need to be re-sentinelled per
+	// draw. Call after every protocol-written draw.
 	inline void reset_all_slots(IDirect3DDevice9* dev) {
 		dev->SetRenderState(kRsCategoryFlags, kSentinel);
 		dev->SetRenderState(kRsModifier,      kSentinel);
-		dev->SetRenderState(kRsHashOverride,  kSentinel);
-		dev->SetRenderState(kRsTempFloat01,   kSentinel);
-		dev->SetRenderState(kRsTempFloat02,   kSentinel);
 	}
 
 } // namespace remix_protocol

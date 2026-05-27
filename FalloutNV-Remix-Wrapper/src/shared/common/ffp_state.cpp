@@ -1,5 +1,6 @@
 #include "std_include.hpp"
 #include "ffp_state.hpp"
+#include "ps_reflect.hpp"
 
 namespace shared::common
 {
@@ -22,6 +23,7 @@ namespace shared::common
 
 	void ffp_state::on_set_vs_const_f(UINT start_reg, const float* data, UINT count)
 	{
+		PROFILE_ZONE_N("ffp::on_set_vs_const_f");
 		if (!data || start_reg + count > 256) return;
 
 		std::memcpy(&vs_const_[start_reg * 4], data, count * 4 * sizeof(float));
@@ -57,10 +59,22 @@ namespace shared::common
 			view_proj_valid_ = true;
 		}
 
-		for (UINT i = 0; i < count; i++)
+		// The FSM above consults exactly two entries (view_start, proj_start);
+		// the rest of the log is only ever read by diagnostics/imgui. Always
+		// keep those two sentinels current, but skip the per-element fill
+		// unless something is actively observing the full log.
+		if (start_reg <= view_start && view_start < start_reg + count)
+			vs_const_write_log_[view_start] = 1;
+		if (start_reg <= proj_start && proj_start < start_reg + count)
+			vs_const_write_log_[proj_start] = 1;
+
+		if (vs_write_log_enabled_)
 		{
-			if (start_reg + i < 256)
-				vs_const_write_log_[start_reg + i] = 1;
+			for (UINT i = 0; i < count; i++)
+			{
+				if (start_reg + i < 256)
+					vs_const_write_log_[start_reg + i] = 1;
+			}
 		}
 
 		// Bone palette detection (for skinning module)
@@ -76,14 +90,27 @@ namespace shared::common
 
 	void ffp_state::on_set_ps_const_f(UINT start_reg, const float* data, UINT count)
 	{
+		PROFILE_ZONE_N("ffp::on_set_ps_const_f");
 		if (!data || start_reg + count > 32) return;
 
 		std::memcpy(&ps_const_[start_reg * 4], data, count * 4 * sizeof(float));
-		ps_const_dirty_ = true;
+	}
+
+	bool ffp_state::vs_const_matches(UINT start_reg, const float* data, UINT count) const
+	{
+		if (!data || start_reg + count > 256) return false;
+		return std::memcmp(&vs_const_[start_reg * 4], data, count * 4 * sizeof(float)) == 0;
+	}
+
+	bool ffp_state::ps_const_matches(UINT start_reg, const float* data, UINT count) const
+	{
+		if (!data || start_reg + count > 32) return false;
+		return std::memcmp(&ps_const_[start_reg * 4], data, count * 4 * sizeof(float)) == 0;
 	}
 
 	void ffp_state::on_set_vertex_shader(IDirect3DVertexShader9* shader)
 	{
+		PROFILE_ZONE_N("ffp::on_set_vertex_shader");
 		if (shader) shader->AddRef();
 		if (last_vs_) last_vs_->Release();
 		last_vs_ = shader;
@@ -92,6 +119,7 @@ namespace shared::common
 
 	bool ffp_state::on_set_pixel_shader(IDirect3DPixelShader9* shader)
 	{
+		PROFILE_ZONE_N("ffp::on_set_pixel_shader");
 		if (shader) shader->AddRef();
 		if (last_ps_) last_ps_->Release();
 		last_ps_ = shader;
@@ -102,12 +130,14 @@ namespace shared::common
 
 	void ffp_state::on_set_texture(UINT stage, IDirect3DBaseTexture9* texture)
 	{
+		PROFILE_ZONE_N("ffp::on_set_texture");
 		if (stage < 8)
 			cur_texture_[stage] = texture;
 	}
 
 	void ffp_state::on_set_stream_source(UINT stream, IDirect3DVertexBuffer9* vb, UINT offset, UINT stride)
 	{
+		PROFILE_ZONE_N("ffp::on_set_stream_source");
 		if (stream < 4)
 		{
 			stream_vb_[stream] = vb;
@@ -118,6 +148,7 @@ namespace shared::common
 
 	void ffp_state::on_set_vertex_declaration(IDirect3DVertexDeclaration9* decl)
 	{
+		PROFILE_ZONE_N("ffp::on_set_vertex_declaration");
 		last_decl_ = decl;
 		cur_decl_is_skinned_ = false;
 		cur_decl_has_texcoord_ = false;
@@ -226,6 +257,7 @@ namespace shared::common
 
 	void ffp_state::on_present()
 	{
+		PROFILE_ZONE_N("ffp::on_present");
 		frame_count_++;
 		ffp_setup_ = false;
 		draw_call_count_ = 0;
@@ -236,6 +268,7 @@ namespace shared::common
 
 	void ffp_state::on_begin_scene()
 	{
+		PROFILE_ZONE_N("ffp::on_begin_scene");
 		ffp_setup_ = false;
 		scene_count_++;
 	}
@@ -247,12 +280,15 @@ namespace shared::common
 
 		view_proj_valid_ = false;
 		ffp_setup_ = false;
+		tss_mode_ = tss_mode_t::none;
 		world_dirty_ = false;
 		view_proj_dirty_ = false;
-		ps_const_dirty_ = false;
 		ffp_active_ = false;
 		bone_start_reg_ = 0;
 		num_bones_ = 0;
+		kept_bound_mask_ = 0;
+		stage0_changed_ = false;
+		last_albedo_stage0_ = nullptr;
 
 		log("FFP", "State reset");
 	}
@@ -261,6 +297,7 @@ namespace shared::common
 
 	void ffp_state::engage(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("ffp::engage");
 		if (!enabled_ || !dev) return;
 
 		if (!ffp_active_)
@@ -282,6 +319,7 @@ namespace shared::common
 
 	void ffp_state::disengage(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("ffp::disengage");
 		if (!ffp_active_ || !dev) return;
 
 		dev->SetVertexShader(last_vs_);
@@ -291,6 +329,12 @@ namespace shared::common
 
 	void ffp_state::setup_albedo_texture(IDirect3DDevice9* dev)
 	{
+		setup_albedo_texture(dev, nullptr);
+	}
+
+	void ffp_state::setup_albedo_texture(IDirect3DDevice9* dev, const PsSlotMap* psmap)
+	{
+		PROFILE_ZONE_N("ffp::setup_albedo_texture");
 		if (!dev) return;
 
 		int as = cfg_->albedo_stage;
@@ -305,13 +349,45 @@ namespace shared::common
 
 		auto* albedo = (as >= 0 && as < 8) ? cur_texture_[as] : cur_texture_[0];
 
+		// Track whether we actually changed stage 0 so restore_textures can
+		// skip the write when the AlbedoStage heuristic resolved to stage 0
+		// (common HQ-terrain/BI path picks a non-zero stage, in which case
+		// the device's slot 0 is unchanged and the restore is wasted).
+		stage0_changed_ = (albedo != cur_texture_[0]);
+		last_albedo_stage0_ = albedo;
 		dev->SetTexture(0, albedo);
+
+		// Build the keep-bound mask from the PS slot map. Stages mentioned in
+		// the classifier (normal/glow/height; diffuse if non-zero) will be
+		// rebound by apply_ps_protocol anyway, so skip both the null-write
+		// here AND the corresponding restore later.
+		uint8_t keep = 0;
+		if (psmap && psmap->any_classified) {
+			const uint8_t kNo = PsSlotMap::kNoSlot;
+			const uint8_t diffuseSlot = psmap->slot(PsSlotRole::Diffuse);
+			const uint8_t normalSlot  = psmap->slot(PsSlotRole::Normal);
+			const uint8_t glowSlot    = psmap->slot(PsSlotRole::Glow);
+			const uint8_t heightSlot  = psmap->slot(PsSlotRole::Height);
+			if (diffuseSlot != kNo && diffuseSlot >= 1 && diffuseSlot < 8) keep |= (1u << diffuseSlot);
+			if (normalSlot  != kNo && normalSlot  >= 1 && normalSlot  < 8) keep |= (1u << normalSlot);
+			if (glowSlot    != kNo && glowSlot    >= 1 && glowSlot    < 8) keep |= (1u << glowSlot);
+			if (heightSlot  != kNo && heightSlot  >= 1 && heightSlot  < 8) keep |= (1u << heightSlot);
+		}
+		kept_bound_mask_ = keep;
+
+		// Skip null-writes for slots the game already left null. cur_texture_[]
+		// is the wrapper's mirror of every game-side SetTexture; if the game's
+		// view says the slot is null, the device slot is also null (nothing
+		// between game's SetTexture and this point can mutate textures). Also
+		// skip slots the PS protocol will rebind.
 		for (DWORD ts = 1; ts < 8; ts++)
-			dev->SetTexture(ts, nullptr);
+			if (cur_texture_[ts] != nullptr && !(keep & (1u << ts)))
+				dev->SetTexture(ts, nullptr);
 	}
 
 	void ffp_state::setup_albedo_texture_preserve_slots(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("ffp::setup_albedo_tex_preserve");
 		if (!dev) return;
 
 		int as = cfg_->albedo_stage;
@@ -324,6 +400,8 @@ namespace shared::common
 
 		auto* albedo = (as >= 0 && as < 8) ? cur_texture_[as] : cur_texture_[0];
 
+		stage0_changed_ = (albedo != cur_texture_[0]);
+		last_albedo_stage0_ = albedo;
 		dev->SetTexture(0, albedo);
 		// INTENTIONALLY does NOT null slots 1-7 — dxvk-remix's multi-layer
 		// capture reads d3d9State.textures[1..13] directly for albedos+normals.
@@ -331,16 +409,32 @@ namespace shared::common
 
 	void ffp_state::restore_textures(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("ffp::restore_textures");
 		if (!dev) return;
 
-		for (DWORD ts = 0; ts < 8; ts++)
-			dev->SetTexture(ts, cur_texture_[ts]);
+		// Stage 0 only needs a restore when setup_albedo_texture actually
+		// re-pointed it. If the AlbedoStage heuristic resolved to stage 0
+		// (or the picked stage was null and we fell back to cur_texture_[0])
+		// the device binding never changed.
+		if (stage0_changed_) {
+			dev->SetTexture(0, cur_texture_[0]);
+		}
+		// Stages 1-7: setup only changed slots where cur_texture_[ts] was
+		// non-null AND the slot wasn't in the kept-bound mask (apply_ps_protocol
+		// kept those bound to the same texture; nothing to restore).
+		const uint8_t keep = kept_bound_mask_;
+		for (DWORD ts = 1; ts < 8; ts++)
+			if (cur_texture_[ts] != nullptr && !(keep & (1u << ts)))
+				dev->SetTexture(ts, cur_texture_[ts]);
+		kept_bound_mask_ = 0;
+		stage0_changed_ = false;
 	}
 
 	// ---- Internal helpers ----
 
 	void ffp_state::apply_transforms(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("ffp::apply_transforms");
 		float transposed[16];
 
 		if (view_proj_dirty_)
@@ -365,6 +459,7 @@ namespace shared::common
 
 	void ffp_state::setup_lighting(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("ffp::setup_lighting");
 		dev->SetRenderState(D3DRS_LIGHTING, FALSE);
 
 		D3DMATERIAL9 mat = {};
@@ -375,6 +470,9 @@ namespace shared::common
 
 	void ffp_state::setup_texture_stages(IDirect3DDevice9* dev)
 	{
+		PROFILE_ZONE_N("ffp::setup_texture_stages");
+		if (tss_mode_ == tss_mode_t::ffp_geo) return;
+
 		// Stage 0: modulate texture color with vertex/material diffuse
 		dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
 		dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
@@ -393,6 +491,40 @@ namespace shared::common
 			dev->SetTextureStageState(s, D3DTSS_COLOROP, D3DTOP_DISABLE);
 			dev->SetTextureStageState(s, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
 		}
+
+		tss_mode_ = tss_mode_t::ffp_geo;
+	}
+
+	void ffp_state::setup_texture_stages_skinned(IDirect3DDevice9* dev)
+	{
+		PROFILE_ZONE_N("ffp::setup_texture_stages_skinned");
+		if (tss_mode_ == tss_mode_t::skinned) return;
+
+		// Stage 0: modulate texture color with vertex diffuse; alpha straight
+		// from texture (skinned vertex blend has no meaningful per-vertex alpha).
+		dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+		dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+		dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_CURRENT);
+		dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+		dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+		dev->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+		dev->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+
+		for (DWORD s = 1; s <= 7; s++)
+		{
+			dev->SetTextureStageState(s, D3DTSS_COLOROP, D3DTOP_DISABLE);
+			dev->SetTextureStageState(s, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+		}
+
+		tss_mode_ = tss_mode_t::skinned;
+	}
+
+	void ffp_state::ensure_ffp_lighting(IDirect3DDevice9* dev)
+	{
+		PROFILE_ZONE_N("ffp::ensure_ffp_lighting");
+		if (ffp_setup_) return;
+		setup_lighting(dev);
+		ffp_setup_ = true;
 	}
 
 	// ---- Utility ----

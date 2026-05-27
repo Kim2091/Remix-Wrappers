@@ -55,6 +55,7 @@ struct ImGui_ImplDX9_Data
     LPDIRECT3DVERTEXBUFFER9     pVB;
     LPDIRECT3DINDEXBUFFER9      pIB;
     LPDIRECT3DTEXTURE9          FontTexture;
+    LPDIRECT3DSTATEBLOCK9       pStateBlock;
     int                         VertexBufferSize;
     int                         IndexBufferSize;
     bool                        HasRgbaSupport;
@@ -183,15 +184,16 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
             return;
     }
 
-    // Backup the DX9 state
-    IDirect3DStateBlock9* state_block = nullptr;
-    if (device->CreateStateBlock(D3DSBT_ALL, &state_block) < 0)
-        return;
-    if (state_block->Capture() < 0)
+    // Backup the DX9 state. The state block is created once and reused across
+    // frames; per-frame CreateStateBlock costs ~450us in this game and is
+    // unnecessary -- only Capture()/Apply() need to run each frame.
+    if (!bd->pStateBlock)
     {
-        state_block->Release();
-        return;
+        if (device->CreateStateBlock(D3DSBT_ALL, &bd->pStateBlock) < 0)
+            return;
     }
+    if (bd->pStateBlock->Capture() < 0)
+        return;
 
     // Backup the DX9 transform (DX9 documentation suggests that it is included in the StateBlock but it doesn't appear to)
     D3DMATRIX last_world, last_view, last_projection;
@@ -203,14 +205,10 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
     CUSTOMVERTEX* vtx_dst;
     ImDrawIdx* idx_dst;
     if (bd->pVB->Lock(0, (UINT)(draw_data->TotalVtxCount * sizeof(CUSTOMVERTEX)), (void**)&vtx_dst, D3DLOCK_DISCARD) < 0)
-    {
-        state_block->Release();
         return;
-    }
     if (bd->pIB->Lock(0, (UINT)(draw_data->TotalIdxCount * sizeof(ImDrawIdx)), (void**)&idx_dst, D3DLOCK_DISCARD) < 0)
     {
         bd->pVB->Unlock();
-        state_block->Release();
         return;
     }
 
@@ -301,9 +299,8 @@ void ImGui_ImplDX9_RenderDrawData(ImDrawData* draw_data)
     device->SetTransform(D3DTS_VIEW, &last_view);
     device->SetTransform(D3DTS_PROJECTION, &last_projection);
 
-    // Restore the DX9 state
-    state_block->Apply();
-    state_block->Release();
+    // Restore the DX9 state (state block is owned by the backend, do not release)
+    bd->pStateBlock->Apply();
 }
 
 static bool ImGui_ImplDX9_CheckFormatSupport(LPDIRECT3DDEVICE9 pDevice, D3DFORMAT format)
@@ -420,6 +417,7 @@ void ImGui_ImplDX9_InvalidateDeviceObjects()
         return;
     if (bd->pVB) { bd->pVB->Release(); bd->pVB = nullptr; }
     if (bd->pIB) { bd->pIB->Release(); bd->pIB = nullptr; }
+    if (bd->pStateBlock) { bd->pStateBlock->Release(); bd->pStateBlock = nullptr; }
     if (bd->FontTexture) { bd->FontTexture->Release(); bd->FontTexture = nullptr; ImGui::GetIO().Fonts->SetTexID(0); } // We copied bd->pFontTextureView to io.Fonts->TexID so let's clear that as well.
 }
 

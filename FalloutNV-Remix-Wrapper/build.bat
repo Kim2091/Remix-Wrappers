@@ -16,6 +16,7 @@ set "CONFIG=release"
 set "NAME=remix-comp"
 set "COMP_DIR=%ROOT%src\comp"
 set "CUSTOM_COMP=0"
+set "TRACY=0"
 
 :: Parse args
 :parse_args
@@ -24,6 +25,7 @@ if /i "%~1"=="release" ( set "CONFIG=release" & shift & goto :parse_args )
 if /i "%~1"=="debug"   ( set "CONFIG=debug"   & shift & goto :parse_args )
 if /i "%~1"=="--name"  ( set "NAME=%~2-comp"  & shift & shift & goto :parse_args )
 if /i "%~1"=="--comp"  ( set "COMP_DIR=%~2" & set "CUSTOM_COMP=1" & shift & shift & goto :parse_args )
+if /i "%~1"=="--tracy" ( set "TRACY=1" & shift & goto :parse_args )
 echo Unknown argument: %~1
 exit /b 1
 :args_done
@@ -74,6 +76,7 @@ mkdir "%GAME_OBJ%" 2>nul
 
 :: Include paths
 set "INC=/I"%SRC%" /I"%DEPS%\bridge_api" /I"%DEPS%\dxsdk\Include" /I"%DEPS%\imgui" /I"%DEPS%\minhook\include""
+if "%TRACY%"=="1" set "INC=%INC% /I"%DEPS%\tracy""
 
 :: Lib search path
 set "LIBPATH=/LIBPATH:"%DEPS%\dxsdk\Lib\x86""
@@ -92,12 +95,43 @@ if /i "%CONFIG%"=="release" (
     set "LF="
 )
 
+:: Tracy defines (added to every TU when --tracy)
+if "%TRACY%"=="1" (
+    set "CF=%CF% /DTRACY_ENABLE /DTRACY_ON_DEMAND"
+)
+
 echo.
 echo === remix-comp build (d3d9.dll proxy) ===
 echo Config:  %CONFIG%
 echo Output:  %GAME_OUT%\d3d9.dll
 echo CompDir: %COMP_DIR%
+echo Tracy:   %TRACY%
 echo.
+
+:: -------------------------------------------------------
+:: Step 0: tracy (C++ static lib, only when --tracy)
+:: -------------------------------------------------------
+if "%TRACY%"=="1" (
+    echo [0/4] tracy
+    mkdir "%OBJ%\tracy" 2>nul
+    if /i "%CONFIG%"=="release" (
+        cl /nologo /c /W0 /MP /MT /O2 /EHsc ^
+            /DTRACY_ENABLE /DTRACY_ON_DEMAND ^
+            /I"%DEPS%\tracy" ^
+            /Fo"%OBJ%\tracy\\" ^
+            "%DEPS%\tracy\TracyClient.cpp"
+        if errorlevel 1 goto :fail
+    ) else (
+        cl /nologo /c /W0 /MP /MTd /Od /EHsc /Zi ^
+            /DTRACY_ENABLE /DTRACY_ON_DEMAND ^
+            /I"%DEPS%\tracy" ^
+            /Fo"%OBJ%\tracy\\" ^
+            "%DEPS%\tracy\TracyClient.cpp"
+        if errorlevel 1 goto :fail
+    )
+    lib /nologo /OUT:"%OUT%\tracy.lib" "%OBJ%\tracy\*.obj"
+    if errorlevel 1 goto :fail
+)
 
 :: -------------------------------------------------------
 :: Step 1: minhook (C static lib)
@@ -195,6 +229,8 @@ cl /nologo /c %CF% %INC% /I"%COMP_DIR%\.." ^
 if errorlevel 1 goto :fail
 
 :: Link DLL as d3d9.dll proxy (exports via .def, no d3d9.lib import)
+set "TRACY_LIBS="
+if "%TRACY%"=="1" set "TRACY_LIBS="%OUT%\tracy.lib" dbghelp.lib ws2_32.lib"
 link /nologo /DLL /SUBSYSTEM:WINDOWS /DEBUG /PDBCompress %LF% %LIBPATH% ^
     /DEF:"%ROOT%d3d9.def" ^
     /OUT:"%GAME_OUT%\d3d9.dll" ^
@@ -203,6 +239,7 @@ link /nologo /DLL /SUBSYSTEM:WINDOWS /DEBUG /PDBCompress %LF% %LIBPATH% ^
     "%OUT%\_shared.lib" ^
     "%OUT%\imgui.lib" ^
     "%OUT%\minhook.lib" ^
+    %TRACY_LIBS% ^
     d3dx9.lib psapi.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib
 if errorlevel 1 goto :fail
 

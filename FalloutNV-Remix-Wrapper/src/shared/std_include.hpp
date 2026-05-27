@@ -45,5 +45,6 @@
 #include "utils/hooking.hpp"
 #include "utils/memory.hpp"
 #include "common/loader.hpp"
+#include "common/profiler.hpp"
 
 using namespace std::literals;
