@@ -51,8 +51,16 @@ namespace comp::game
 		D3DPRIMITIVETYPE pt, INT base_vtx, UINT min_vtx, UINT num_verts,
 		UINT start_idx, UINT prim_count);
 
-	// Called from d3d9ex SetVertexShaderConstantF for immediate bone upload
-	void on_set_vs_const_f(IDirect3DDevice9* dev, UINT start_reg, const float* data, UINT count);
+	// Called from d3d9ex SetVertexShaderConstantF for immediate bone upload.
+	// Returns true when the upload was consumed as a skinned bone (replayed as
+	// a SetTransform) — the caller then skips forwarding the raw constant to the
+	// device, since the FFP skinned path nulls the VS and the c[] register is dead.
+	bool on_set_vs_const_f(IDirect3DDevice9* dev, UINT start_reg, const float* data, UINT count);
+
+	// Re-upload the cached bone constant range to the real device. Called from
+	// the rare draw_skinned_dip fallbacks that draw with the game's real
+	// skinning VS, which needs the bones that on_set_vs_const_f swallowed.
+	void flush_bones_to_device(IDirect3DDevice9* dev);
 
 	// Skinning state
 	inline int  num_bones          = 0;

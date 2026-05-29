@@ -329,6 +329,7 @@ namespace comp::game
 		if (num_bones <= 0)
 		{
 			ffp.disengage(dev);
+			flush_bones_to_device(dev);
 			return dev->DrawIndexedPrimitive(pt, base_vtx, min_vtx, num_verts, start_idx, prim_count);
 		}
 
@@ -336,6 +337,7 @@ namespace comp::game
 		if (!cloned_decl)
 		{
 			ffp.disengage(dev);
+			flush_bones_to_device(dev);
 			return dev->DrawIndexedPrimitive(pt, base_vtx, min_vtx, num_verts, start_idx, prim_count);
 		}
 
@@ -387,14 +389,20 @@ namespace comp::game
 	// Immediate bone upload (called from d3d9ex SetVertexShaderConstantF)
 	// ================================================================
 
-	void on_set_vs_const_f(IDirect3DDevice9* dev, [[maybe_unused]] UINT start_reg, const float* data, UINT count)
+	// Register range [lo, hi) of bone uploads whose device forward was swallowed
+	// for the current object. Used by flush_bones_to_device to restore the
+	// device c[] file before a real-shader fallback draw. Reset per object.
+	static UINT bone_flush_lo = 256;
+	static UINT bone_flush_hi = 0;
+
+	bool on_set_vs_const_f(IDirect3DDevice9* dev, UINT start_reg, const float* data, UINT count)
 	{
 		PROFILE_ZONE_N("game::on_set_vs_const_f");
 		constexpr int REGS_PER_BONE = 3;
 
-		if (count != REGS_PER_BONE) return;
+		if (count != REGS_PER_BONE) return false;
 		if (!(g_hooks_installed ? g_render_skinned : shared::common::ffp_state::get().cur_decl_is_skinned()))
-			return;
+			return false;
 
 		// New bone batch: reset counter on per-object boundary or after draw
 		if (g_bone_reset_pending || bones_drawn)
@@ -413,6 +421,8 @@ namespace comp::game
 			num_bones = 0;
 			bones_drawn = false;
 			g_bone_reset_pending = 0;
+			bone_flush_lo = 256;
+			bone_flush_hi = 0;
 		}
 
 		if (num_bones < MAX_FFP_BONES && data)
@@ -426,7 +436,26 @@ namespace comp::game
 
 			dev->SetTransform(static_cast<D3DTRANSFORMSTATETYPE>(D3DTS_WORLDMATRIX(num_bones)), &bone_mat);
 			num_bones++;
+
+			// Record the range so a real-shader fallback can restore it; the
+			// raw constant is otherwise swallowed (dead under the nulled FFP VS).
+			if (start_reg < bone_flush_lo) bone_flush_lo = start_reg;
+			if (start_reg + count > bone_flush_hi) bone_flush_hi = start_reg + count;
+			return true;
 		}
+
+		// At/over the FFP bone limit: not represented in the bone palette, so let
+		// the raw constant forward normally to keep a fallback draw correct.
+		return false;
+	}
+
+	void flush_bones_to_device(IDirect3DDevice9* dev)
+	{
+		PROFILE_ZONE_N("game::flush_bones_to_device");
+		if (bone_flush_hi <= bone_flush_lo) return;
+		const float* cache = shared::common::ffp_state::get().vs_const_data();
+		dev->SetVertexShaderConstantF(bone_flush_lo, &cache[bone_flush_lo * 4],
+			bone_flush_hi - bone_flush_lo);
 	}
 
 

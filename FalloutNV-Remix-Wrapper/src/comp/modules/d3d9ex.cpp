@@ -713,7 +713,14 @@ namespace comp
 		ffp.on_set_vs_const_f(StartRegister, pConstantData, Vector4fCount);
 		if (auto* d = diagnostics::get())
 			d->on_set_vs_const_f(StartRegister, pConstantData, Vector4fCount);
-		game::on_set_vs_const_f(m_pIDirect3DDevice9, StartRegister, pConstantData, Vector4fCount);
+
+		// When the upload is consumed as a skinned bone it is replayed as a
+		// SetTransform and the FFP path nulls the VS, so the raw constant is
+		// dead on the device. Skip the forward (one fewer bridge crossing per
+		// bone); draw_skinned_dip's real-shader fallbacks flush it back.
+		if (game::on_set_vs_const_f(m_pIDirect3DDevice9, StartRegister, pConstantData, Vector4fCount))
+			return D3D_OK;
+
 		return m_pIDirect3DDevice9->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
 	}
 
