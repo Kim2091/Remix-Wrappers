@@ -273,6 +273,20 @@ namespace comp::game
 		}
 	}
 
+	void apply_world_sink(IDirect3DDevice9* dev, float sink)
+	{
+		PROFILE_ZONE_N("game::apply_world_sink");
+		if (sink == 0.0f) return;
+		float* world = get_renderer_matrix(RENDERER_WORLD_OFF);
+		if (!world) return;
+
+		// Copy, lower the world-space Z translation (row 4, col 3 = _43), re-bind.
+		// FNV is Z-up, so subtracting from _43 drops the geometry's altitude.
+		D3DMATRIX w = *reinterpret_cast<const D3DMATRIX*>(world);
+		w._43 -= sink;
+		dev->SetTransform(D3DTS_WORLD, &w);
+	}
+
 
 	// ================================================================
 	// Render target tracking

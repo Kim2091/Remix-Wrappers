@@ -22,6 +22,25 @@ namespace shared::common
 			int terrain_albedo_stage = 1;   // for has_color && n_texcoords >= 2 (HQ terrain / multi-tile blend)
 			int bi_albedo_stage = 1;        // for !skinned && has_blendindices (atlas-tile-selector decls)
 
+			// Route distant-terrain LOD shaders (PS with an LOD-prefixed sampler)
+			// through the FFP world-geometry path instead of passthrough+Ignore.
+			//   ON  -> LOD terrain is path-traced and stops paying the passthrough
+			//          tax, but s0 is an atlas the game's PS does UV math on, so the
+			//          fixed-function sampler may tile the atlas across each tile.
+			//   OFF -> legacy passthrough+Ignore (game's own PS rasterises the LOD).
+			// Toggle in [FFP] RouteLodToFfp to A/B without a rebuild.
+			bool route_lod_to_ffp = true;
+
+			// Approximate the engine's per-vertex LOD sink for no-normal terrain
+			// LOD routed through FFP. The game's LOD VS lowers vertices that fall
+			// inside the loaded-cell range (GeomorphParams.y, c19.y) so the coarse
+			// LOD tucks under the real terrain; FFP can't do that per-vertex test,
+			// so we sink the whole draw's world-Z uniformly instead.
+			//   < 0  -> AUTO: sink by the engine's own GeomorphParams.y each draw.
+			//   == 0 -> disabled (no sink; coarse LOD will poke through).
+			//   > 0  -> fixed sink in world units (manual override / tuning).
+			float lod_sink_z = -1.0f;
+
 			// Skip "fake shadow" overlay draws: NOLIGHTING geometry whose vertex
 			// colors are all grayscale with at least one dark vertex (FNV's baked
 			// planar shadow overlays). Remix ray-traces real shadows, so these are

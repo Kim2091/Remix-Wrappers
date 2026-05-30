@@ -35,6 +35,14 @@ namespace comp::game
 	// Apply World/View/Projection from NiDX9Renderer directly (no VS constant decomposition)
 	void apply_transforms(IDirect3DDevice9* dev);
 
+	// Lower the bound D3DTS_WORLD by `sink` world-Z units (FNV is Z-up). Used to
+	// approximate the LOD vertex shader's loaded-cell sink for FFP-routed terrain
+	// LOD, so the coarse LOD tucks under the real terrain instead of poking
+	// through. Reads the world matrix from NiDX9Renderer (same source as
+	// apply_transforms) rather than GetTransform, which isn't reliable through
+	// the Remix bridge. No-op when sink == 0.
+	void apply_world_sink(IDirect3DDevice9* dev, float sink);
+
 	// --- Render target tracking ---
 
 	// Track whether current RT is the backbuffer (skip FFP for off-screen draws)

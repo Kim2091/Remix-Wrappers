@@ -6,6 +6,7 @@
 #include "shared/common/ffp_state.hpp"
 #include "shared/common/ps_reflect.hpp"
 #include "shared/common/remix_protocol.hpp"
+#include "shared/common/config.hpp"
 
 namespace comp
 {
@@ -262,9 +263,13 @@ namespace comp
 			// geometry then floats with the camera. Passthrough so the
 			// rasterised output is correct, AND tag InstanceCategories::Ignore
 			// via RS 42 so Remix skips path-tracing this draw entirely.
-			// LOD shaders take the same path: their s0 is an atlas the game's
-			// PS does UV math on, not a routable diffuse.
-			if (!game::is_sky() && (!ps_has_diffuse_role(psmap) || ps_is_lod_shader(psmap)))
+			// LOD shaders stay passthrough when RouteLodToFfp is off, OR when the
+			// LOD has a vertex normal -- the with-normal near land LOD fades via a
+			// VS-computed alpha (oT4.x) that FFP can't reproduce, so it must keep its
+			// own PS. Only the no-normal far LOD goes to FFP. See the indexed path.
+			if (!game::is_sky() && (!ps_has_diffuse_role(psmap) ||
+				(ps_is_lod_shader(psmap) &&
+				 (!shared::common::config::get().ffp.route_lod_to_ffp || ffp.cur_decl_has_normal()))))
 			{
 				fnv_disengage(dev);
 				remix_protocol::set_category_flags(dev,
@@ -422,8 +427,18 @@ namespace comp
 			ffp.restore_textures(dev);
 			im->m_stats._drawcall_indexed_prim.track_single();
 		}
-		else if (!ffp.cur_decl_has_normal())
+		else if (!ffp.cur_decl_has_normal() &&
+			!(shared::common::config::get().ffp.route_lod_to_ffp &&
+			  ps_is_lod_shader(shared::common::g_ps_classifier.classify(ffp.last_ps()))))
 		{
+			// No-normal draws are HUD / effects / post-process / distant-terrain LOD.
+			// EXCEPTION: when RouteLodToFfp is on, LOD-sampler shaders skip this gate
+			// and fall through to FFP_GEO below so they get path-traced instead of
+			// paying the passthrough tax. ps_harvest confirmed FNV's distant-terrain
+			// LOD has normal=0, so it would otherwise be trapped here -- three branches
+			// before the LOD branch. Remix synthesises geometric normals for FFP geo,
+			// so the missing vertex normal is fine; the open risk is the s0 LOD atlas
+			// tiling if the game does its sub-tile UV math in the pixel shader.
 			PROFILE_ZONE_N("route_PASS_NO_NORMAL");
 			if (diag) diag->route("PASS_NO_NORMAL");
 			fnv_disengage(dev);
@@ -457,17 +472,19 @@ namespace comp
 				im->m_stats._drawcall_indexed_prim.track_single();
 				im->m_stats._drawcall_indexed_prim_using_vs.track_single();
 			}
-			else if (ps_is_lod_shader(psmap))
+			else if (ps_is_lod_shader(psmap) &&
+				(!shared::common::config::get().ffp.route_lod_to_ffp || ffp.cur_decl_has_normal()))
 			{
-				// Distant-terrain LOD shaders sample an LOD atlas / parent-tile
-				// texture at s0 with serious UV math (LODLandNoise / LODParentTex
-				// / LODParentNormals blend). The "BaseMap" label at s0 is
-				// misleading -- it's a multi-purpose LOD source, not a clean
-				// per-tile diffuse. Engaging FFP and routing s0 as raw albedo
-				// paints the entire atlas tiled across each terrain tile.
-				// Passthrough so the game's actual PS runs and produces the
-				// correct rasterised LOD blend, and tag Ignore so the path
-				// tracer skips RT capture -- rasterisation is the only output.
+				// LOD land shaders keep passthrough in two cases:
+				//   * RouteLodToFfp off -> legacy behaviour (everything passthrough).
+				//   * The WITH-NORMAL near land LOD (e.g. 0x6626FACE) -> its vertex
+				//     shader computes a distance ALPHA FADE (oT4.x) that the PS emits
+				//     as output alpha, so the LOD dissolves as you approach. FFP takes
+				//     alpha from the texture (SELECTARG1), not that computed fade, so
+				//     under FFP the near LOD stays fully opaque and covers the real
+				//     terrain until it stops drawing. Passthrough preserves the fade.
+				// Only the no-normal FAR LOD (0x36E87D02) goes to FFP (+ world sink).
+				// Tag Ignore so the path tracer skips RT -- rasterisation is output.
 				PROFILE_ZONE_N("route_PASS_LOD_SHADER");
 				if (diag) diag->route("PASS_LOD_SHADER");
 				fnv_disengage(dev);
@@ -495,6 +512,24 @@ namespace comp
 				fnv_engage(dev);
 				game::disable_skinning(dev);
 				ffp.setup_albedo_texture(dev, psmap);
+
+				// No-normal terrain LOD is the geomorph/sink-VS class (F36CCF49): the
+				// VS sinks vertices inside HighDetailRange by GeomorphParams.y so the
+				// coarse LOD tucks under real terrain. FFP can't run that per-vertex
+				// box test, and a per-DRAW approximation can't reproduce chunks that
+				// straddle the loaded-cell boundary (verified empirically -- per-draw
+				// under-sinks straddlers and seams). So we sink the whole draw
+				// uniformly by a small amount: AUTO (LodSinkZ < 0) uses the engine's
+				// own GeomorphParams.y; tune LodSinkZ down to trade a little steady-
+				// state poke-through for less terrain drop during cell streaming.
+				if (ps_is_lod_shader(psmap) && !ffp.cur_decl_has_normal())
+				{
+					const float cfg_z = shared::common::config::get().ffp.lod_sink_z;
+					const float sink = (cfg_z < 0.0f)
+						? ffp.vs_const_data()[19 * 4 + 1]   // AUTO: engine GeomorphParams.y (c19.y)
+						: cfg_z;
+					game::apply_world_sink(dev, sink);
+				}
 
 				// PS-classifier drives slot-0 rebind + normal-map slot preservation
 				// + RS 149 protocol payload. Always succeeds at this point because

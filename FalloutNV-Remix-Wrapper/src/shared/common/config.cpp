@@ -62,6 +62,8 @@ namespace shared::common
 		ffp.bi_albedo_stage = get_int("FFP", "BIAlbedoStage", 1);
 		if (ffp.bi_albedo_stage < 0 || ffp.bi_albedo_stage > 7) ffp.bi_albedo_stage = 1;
 		ffp.skip_fake_shadows = get_bool("FFP", "SkipFakeShadows", false);
+		ffp.route_lod_to_ffp = get_bool("FFP", "RouteLodToFfp", true);
+		ffp.lod_sink_z = get_float("FFP", "LodSinkZ", -1.0f);
 
 		// [Skinning]
 		skinning.enabled = get_bool("Skinning", "Enabled", false);
@@ -91,8 +93,8 @@ namespace shared::common
 		moon_cycle.enabled = get_bool("MoonCycle", "Enabled", true);
 
 		log("Config", std::format("Loaded from: {}", ini_path_));
-		log("Config", std::format("FFP={} AlbedoStage={} TerrainAlbedoStage={} BIAlbedoStage={}",
-			ffp.enabled ? 1 : 0, ffp.albedo_stage, ffp.terrain_albedo_stage, ffp.bi_albedo_stage));
+		log("Config", std::format("FFP={} AlbedoStage={} TerrainAlbedoStage={} BIAlbedoStage={} RouteLodToFfp={}",
+			ffp.enabled ? 1 : 0, ffp.albedo_stage, ffp.terrain_albedo_stage, ffp.bi_albedo_stage, ffp.route_lod_to_ffp ? 1 : 0));
 		if (skinning.enabled)
 			log("Config", "Skinning ENABLED", LOG_TYPE::LOG_TYPE_WARN);
 		if (culling.enabled)
