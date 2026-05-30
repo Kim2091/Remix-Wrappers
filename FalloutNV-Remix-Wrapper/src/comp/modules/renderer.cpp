@@ -226,8 +226,18 @@ namespace comp
 		auto& ffp = shared::common::ffp_state::get();
 		ffp.increment_draw_count();
 
-		if (auto* d = diagnostics::get())
+		if (auto* d = diagnostics::get()) {
+			d->harvest_draw();
 			d->on_draw_primitive(ffp.draw_call_count(), PrimitiveType, StartVertex, PrimitiveCount);
+		}
+
+		// Drop FNV fake-shadow overlays (see DrawIndexedPrimitive note).
+		if (game::should_skip_fake_shadow(dev, static_cast<INT>(StartVertex), PrimitiveCount * 3, ffp.last_ps()))
+		{
+			ctx.restore_all(dev);
+			ctx.reset_context();
+			return S_OK;
+		}
 
 		auto hr = S_OK;
 
@@ -312,12 +322,23 @@ namespace comp
 		auto& ffp = shared::common::ffp_state::get();
 		ffp.increment_draw_count();
 
-		if (auto* d = diagnostics::get())
+		if (auto* d = diagnostics::get()) {
+			d->harvest_draw();
 			d->on_draw_indexed_prim(ffp.draw_call_count(), dev, PrimitiveType, BaseVertexIndex, NumVertices, primCount);
+		}
 
 		im->m_stats._drawcall_indexed_prim_incl_ignored.track_single();
 
 		if (ctx.modifiers.do_not_render)
+		{
+			ctx.restore_all(dev);
+			ctx.reset_context();
+			return S_OK;
+		}
+
+		// Drop FNV fake-shadow overlays (NOLIGHTING + all-gray vertex colors);
+		// Remix ray-traces real shadows. Keep-listed PSes (Pip-Boy) are spared.
+		if (game::should_skip_fake_shadow(dev, BaseVertexIndex, NumVertices, ffp.last_ps()))
 		{
 			ctx.restore_all(dev);
 			ctx.reset_context();

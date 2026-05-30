@@ -154,6 +154,8 @@ namespace shared::common
 		cur_decl_has_texcoord_ = false;
 		cur_decl_has_normal_ = false;
 		cur_decl_has_color_ = false;
+		cur_decl_color_off_ = -1;
+		cur_decl_color_type_ = -1;
 		cur_decl_has_blendindices_ = false;
 		cur_decl_has_tangent_ = false;
 		cur_decl_has_pos_t_ = false;
@@ -231,6 +233,11 @@ namespace shared::common
 
 			case D3DDECLUSAGE_COLOR:
 				cur_decl_has_color_ = true;
+				if (el.UsageIndex == 0 && el.Stream == 0)
+				{
+					cur_decl_color_off_ = el.Offset;
+					cur_decl_color_type_ = el.Type;
+				}
 				break;
 
 			case D3DDECLUSAGE_TANGENT:

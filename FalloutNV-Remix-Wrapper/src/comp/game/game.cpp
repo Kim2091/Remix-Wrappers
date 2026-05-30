@@ -2,6 +2,7 @@
 #include "shared/common/flags.hpp"
 #include "shared/common/config.hpp"
 #include "shared/common/ffp_state.hpp"
+#include "shared/common/ps_reflect.hpp"
 
 /*
  * Fallout: New Vegas game-specific code.
@@ -23,6 +24,12 @@ namespace comp::game
 	static IDirect3DVertexDeclaration9* skin_decl_orig[SKIN_DECL_CACHE_SIZE]  = {};
 	static IDirect3DVertexDeclaration9* skin_decl_clone[SKIN_DECL_CACHE_SIZE] = {};
 	static int skin_decl_count = 0;
+
+	// World projection [0][0] (FOV term) latched once per frame from the first
+	// world draw. FNV renders the first-person arm/Pip-Boy with a distinct
+	// (zoomed) projection, so a gray draw whose proj[0] differs from this is the
+	// viewmodel, not a baked shadow. 0 until the first world draw of the session.
+	static float g_world_proj00 = 0.0f;
 
 
 	// ================================================================
@@ -84,6 +91,166 @@ namespace comp::game
 		return get_shade_property_type() == KPROP_SKY;
 	}
 
+	// ================================================================
+	// Fake-shadow skip (ported from old standalone proxy SkipFakeShadows)
+	//
+	// FNV draws planar shadow overlays as separate NOLIGHTING geometry whose
+	// vertex colors are all grayscale with at least one dark vertex. They exist
+	// only to darken the surface beneath; Remix ray-traces real shadows, so we
+	// drop these draws.
+	//
+	// The in-world UI (Pip-Boy / terminal screens) is also NOLIGHTING and gray,
+	// so colour alone can't tell them apart. Two signals separate them, found
+	// empirically: baked shadows WRITE depth (ZWRITEENABLE on) while the UI does
+	// not, and the first-person viewmodel renders with a distinct (zoomed) FOV.
+	// A gray draw is only skipped when it writes depth AND uses the world FOV.
+	// ================================================================
+
+	namespace
+	{
+		constexpr unsigned int KPROP_NOLIGHTING  = 0x15;
+		constexpr int          SHADOW_CACHE_SIZE  = 64;   // power of two
+		constexpr int          SHADOW_GRAY_TOL    = 5;    // max |R-G|,|R-B|,|G-B|
+		constexpr int          SHADOW_DARK_THRESH = 250;  // >=1 vert R < this
+		enum { SHADOW_UNKNOWN = 0, SHADOW_IS_FAKE = 1, SHADOW_NOT_FAKE = 2 };
+
+		struct ShadowCacheEntry
+		{
+			IDirect3DVertexBuffer9* vb = nullptr;
+			int base_vtx = 0;
+			int result = SHADOW_UNKNOWN;
+		};
+		ShadowCacheEntry g_shadow_cache[SHADOW_CACHE_SIZE];
+
+		// PS hashes whose NOLIGHTING+gray draws are meaningful UI, not shadows.
+		constexpr uint32_t kFakeShadowKeep[] = { 0x95C1E039u /* Pip-Boy body */ };
+
+		int check_vertex_colors_gray(const unsigned char* vb, UINT num_verts,
+			UINT stride, UINT color_off, int color_type)
+		{
+			bool has_dark = false;
+			for (UINT v = 0; v < num_verts; v++)
+			{
+				const unsigned char* vert = vb + v * stride;
+				int r, g, b;
+				if (color_type == D3DDECLTYPE_D3DCOLOR)
+				{
+					const unsigned char* c = vert + color_off;
+					b = c[0]; g = c[1]; r = c[2];
+				}
+				else if (color_type == D3DDECLTYPE_FLOAT4)
+				{
+					const float* c = reinterpret_cast<const float*>(vert + color_off);
+					r = static_cast<int>(c[0] * 255.0f + 0.5f);
+					g = static_cast<int>(c[1] * 255.0f + 0.5f);
+					b = static_cast<int>(c[2] * 255.0f + 0.5f);
+				}
+				else
+				{
+					return SHADOW_NOT_FAKE;
+				}
+
+				int dRG = r - g; if (dRG < 0) dRG = -dRG;
+				int dRB = r - b; if (dRB < 0) dRB = -dRB;
+				int dGB = g - b; if (dGB < 0) dGB = -dGB;
+				if (dRG > SHADOW_GRAY_TOL || dRB > SHADOW_GRAY_TOL || dGB > SHADOW_GRAY_TOL)
+					return SHADOW_NOT_FAKE;
+
+				if (r < SHADOW_DARK_THRESH)
+					has_dark = true;
+			}
+			return has_dark ? SHADOW_IS_FAKE : SHADOW_NOT_FAKE;
+		}
+
+		// FNV's baked planar shadow geometry WRITES depth (ZWRITEENABLE on); the
+		// in-world UI overlay (Pip-Boy / terminal screens) does NOT. So a gray
+		// NOLIGHTING draw is a fake shadow when it writes depth, and a depth-less
+		// gray draw is UI to keep -- this spares the UI without a PS keep-list.
+		// (Polarity determined empirically: the inverse gate left the Pip-Boy
+		// broken and brought the baked shadows back.)
+		bool draw_writes_depth(IDirect3DDevice9* dev)
+		{
+			if (!dev) return true;  // no handle: preserve legacy skip behaviour
+			DWORD zwrite = 1;
+			dev->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
+			return zwrite != 0;
+		}
+
+		// True when the current draw uses a projection whose FOV term differs
+		// from the frame's world projection -- i.e. the first-person viewmodel
+		// (Pip-Boy / arm), which FNV renders zoomed. Such draws are never fake
+		// shadows even when their material matches (black, depth-writing).
+		bool draw_uses_viewmodel_projection()
+		{
+			if (g_world_proj00 <= 0.0001f) return false;  // no reference yet
+			float* p = get_renderer_matrix(RENDERER_PROJ_OFF);
+			if (!p) return false;
+			float d = p[0] - g_world_proj00;
+			if (d < 0) d = -d;
+			return d > 0.05f * g_world_proj00;  // >5% FOV difference
+		}
+	}
+
+	bool is_no_lighting()
+	{
+		return get_shade_property_type() == KPROP_NOLIGHTING;
+	}
+
+	void clear_fake_shadow_cache()
+	{
+		for (auto& e : g_shadow_cache) { e.vb = nullptr; e.base_vtx = 0; e.result = SHADOW_UNKNOWN; }
+	}
+
+	bool should_skip_fake_shadow(IDirect3DDevice9* dev, INT base_vtx, UINT num_verts,
+		IDirect3DPixelShader9* ps)
+	{
+		PROFILE_ZONE_N("game::should_skip_fake_shadow");
+		const auto& cfg = shared::common::config::get();
+		if (!cfg.ffp.skip_fake_shadows) return false;
+
+		// NOLIGHTING shade property is the cheap first gate.
+		if (!is_no_lighting()) return false;
+
+		auto& ffp = shared::common::ffp_state::get();
+		if (!ffp.cur_decl_has_color() || ffp.cur_decl_color_off() < 0) return false;
+
+		// Spare meaningful UI shaders (Pip-Boy body etc.) whose verts are also gray.
+		if (ps)
+		{
+			const auto* m = shared::common::g_ps_classifier.classify(ps);
+			if (m)
+				for (uint32_t h : kFakeShadowKeep)
+					if (m->ps_hash == h) return false;
+		}
+
+		auto* vb = ffp.stream_vb(0);
+		UINT stride = ffp.stream_stride(0);
+		if (!vb || stride == 0 || num_verts == 0) return false;
+
+		const unsigned int slot =
+			((static_cast<unsigned int>(reinterpret_cast<uintptr_t>(vb) >> 4))
+				^ static_cast<unsigned int>(base_vtx)) & (SHADOW_CACHE_SIZE - 1);
+		auto& e = g_shadow_cache[slot];
+		if (e.vb == vb && e.base_vtx == base_vtx)
+			return e.result == SHADOW_IS_FAKE
+				&& draw_writes_depth(dev) && !draw_uses_viewmodel_projection();
+
+		const UINT read_off = ffp.stream_offset(0) + static_cast<UINT>(base_vtx) * stride;
+		const UINT read_size = num_verts * stride;
+		void* data = nullptr;
+		if (FAILED(vb->Lock(read_off, read_size, &data, D3DLOCK_READONLY)) || !data)
+			return false;
+
+		int result = check_vertex_colors_gray(static_cast<const unsigned char*>(data),
+			num_verts, stride, static_cast<UINT>(ffp.cur_decl_color_off()), ffp.cur_decl_color_type());
+		vb->Unlock();
+
+		e.vb = vb; e.base_vtx = base_vtx; e.result = result;
+
+		return result == SHADOW_IS_FAKE
+			&& draw_writes_depth(dev) && !draw_uses_viewmodel_projection();
+	}
+
 	void apply_transforms(IDirect3DDevice9* dev)
 	{
 		PROFILE_ZONE_N("game::apply_transforms");
@@ -93,6 +260,13 @@ namespace comp::game
 
 		if (world && view && proj)
 		{
+			// Latch the world FOV once per frame. World geometry renders before
+			// the first-person viewmodel, so the first engaged draw of the frame
+			// carries the world projection (not the zoomed Pip-Boy one).
+			static UINT s_proj_frame = 0xFFFFFFFFu;
+			const UINT fc = shared::common::ffp_state::get().frame_count();
+			if (s_proj_frame != fc) { g_world_proj00 = proj[0]; s_proj_frame = fc; }
+
 			dev->SetTransform(D3DTS_WORLD, reinterpret_cast<const D3DMATRIX*>(world));
 			dev->SetTransform(D3DTS_VIEW, reinterpret_cast<const D3DMATRIX*>(view));
 			dev->SetTransform(D3DTS_PROJECTION, reinterpret_cast<const D3DMATRIX*>(proj));
@@ -481,6 +655,7 @@ namespace comp::game
 	void on_reset()
 	{
 		release_skin_cache();
+		clear_fake_shadow_cache();
 		num_bones = 0;
 		prev_num_bones = 0;
 		bones_drawn = false;

@@ -61,6 +61,7 @@ namespace shared::common
 		if (ffp.terrain_albedo_stage < 0 || ffp.terrain_albedo_stage > 7) ffp.terrain_albedo_stage = 1;
 		ffp.bi_albedo_stage = get_int("FFP", "BIAlbedoStage", 1);
 		if (ffp.bi_albedo_stage < 0 || ffp.bi_albedo_stage > 7) ffp.bi_albedo_stage = 1;
+		ffp.skip_fake_shadows = get_bool("FFP", "SkipFakeShadows", false);
 
 		// [Skinning]
 		skinning.enabled = get_bool("Skinning", "Enabled", false);
@@ -79,6 +80,7 @@ namespace shared::common
 		diagnostics.enabled = get_bool("Diagnostics", "Enabled", true);
 		diagnostics.delay_ms = get_int("Diagnostics", "DelayMs", 50000);
 		diagnostics.log_frames = get_int("Diagnostics", "LogFrames", 3);
+		diagnostics.harvest_ps = get_bool("Diagnostics", "HarvestPS", false);
 
 		// [Tracer]
 		tracer.backtrace_depth = get_int("Tracer", "BacktraceDepth", 8);

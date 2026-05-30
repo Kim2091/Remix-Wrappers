@@ -42,6 +42,9 @@ namespace shared::common
 			kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot
 		};
 		bool any_classified = false;
+		// Bytecode hash of the PS this map was parsed from (0 if unset). Lets
+		// consumers log/identify the shader without re-hashing.
+		uint32_t ps_hash = 0;
 		// True iff the PS declares any sampler whose name starts with "LOD"
 		// (e.g. LODLandNoise, LODParentNormals, LODParentTex). FNV's distant-
 		// terrain shaders do serious UV math to sample an LOD atlas at s0;
@@ -127,6 +130,7 @@ namespace shared::common
 
 		static PsSlotMap parse_samplers(const BYTE* bytecode, uint32_t hash) {
 			PsSlotMap map;
+			map.ps_hash = hash;
 
 			// Dump disassembly for the terrain-shape PSes seen in the FFPRoute
 			// diagnostic so the maintainer can read what FNV's terrain actually

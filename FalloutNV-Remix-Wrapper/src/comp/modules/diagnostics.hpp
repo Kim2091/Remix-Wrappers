@@ -46,8 +46,16 @@ namespace comp
 		// Routing-decision tag written per draw when active (called from renderer.cpp branches)
 		void route(const char* tag);
 
+		// PS-harvest: when [Diagnostics] HarvestPS=1, logs each pixel shader's
+		// hash + draw-shape fingerprint on first sight to ps_harvest.log. Used to
+		// identify UI/keep-diffuse shaders by correlating first-appearance with
+		// in-game actions. No-op unless harvesting is enabled. Call per draw.
+		void harvest_draw();
+
 	private:
 		HANDLE log_file_ = INVALID_HANDLE_VALUE;
+		HANDLE harvest_file_ = INVALID_HANDLE_VALUE;
+		bool harvest_ps_ = false;
 		DWORD delay_ms_ = 50000;
 		int max_frames_ = 3;
 		int logged_frames_ = 0;

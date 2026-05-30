@@ -20,6 +20,18 @@ namespace comp::game
 	// NiShadeProperty::m_eShaderType == kProp_Sky (0x0D)
 	bool is_sky();
 
+	// NiShadeProperty::m_eShaderType == kProp_NoLighting (0x15)
+	bool is_no_lighting();
+
+	// True if this draw is a fake-shadow overlay (NOLIGHTING + all-grayscale
+	// vertex colors with a dark vertex) that should be skipped, unless its PS is
+	// on the keep-list. Reads stream-0 vertex colors (cached per VB+base).
+	bool should_skip_fake_shadow(IDirect3DDevice9* dev, INT base_vtx, UINT num_verts,
+		IDirect3DPixelShader9* ps);
+
+	// Clear the fake-shadow result cache (call on device reset).
+	void clear_fake_shadow_cache();
+
 	// Apply World/View/Projection from NiDX9Renderer directly (no VS constant decomposition)
 	void apply_transforms(IDirect3DDevice9* dev);
 

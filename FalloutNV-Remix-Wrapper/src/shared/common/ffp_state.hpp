@@ -93,6 +93,8 @@ namespace shared::common
 		bool cur_decl_has_pos_t() const { return cur_decl_has_pos_t_; }
 		bool cur_decl_has_texcoord() const { return cur_decl_has_texcoord_; }
 		bool cur_decl_has_color() const { return cur_decl_has_color_; }
+		int cur_decl_color_off() const { return cur_decl_color_off_; }
+		int cur_decl_color_type() const { return cur_decl_color_type_; }
 		bool cur_decl_has_blendindices() const { return cur_decl_has_blendindices_; }
 		bool cur_decl_has_tangent() const { return cur_decl_has_tangent_; }
 		int cur_decl_texcoord_type() const { return cur_decl_texcoord_type_; }
@@ -178,6 +180,8 @@ namespace shared::common
 		bool cur_decl_has_texcoord_ = false;
 		bool cur_decl_has_normal_ = false;
 		bool cur_decl_has_color_ = false;
+		int cur_decl_color_off_ = -1;   // byte offset of COLOR0 (usage idx 0, stream 0), or -1
+		int cur_decl_color_type_ = -1;  // D3DDECLTYPE of COLOR0
 		bool cur_decl_has_blendindices_ = false;
 		bool cur_decl_has_tangent_ = false;
 		bool cur_decl_has_pos_t_ = false;

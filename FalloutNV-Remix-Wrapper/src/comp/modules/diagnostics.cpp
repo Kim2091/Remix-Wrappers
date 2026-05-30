@@ -3,6 +3,8 @@
 
 #include "shared/common/config.hpp"
 #include "shared/common/ffp_state.hpp"
+#include "shared/common/ps_reflect.hpp"
+#include "comp/game/game.hpp"
 
 namespace comp
 {
@@ -29,6 +31,15 @@ namespace comp
 			log_str("\r\n");
 		}
 
+		harvest_ps_ = cfg.harvest_ps;
+		if (harvest_ps_)
+		{
+			std::string hpath = shared::globals::root_path + "\\ps_harvest.log";
+			harvest_file_ = CreateFileA(hpath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+				nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+			shared::common::log("Diagnostics", "PS harvest mode ON -> ps_harvest.log");
+		}
+
 		shared::common::log("Diagnostics", std::format("Module initialized, delay={}ms, frames={}",
 			delay_ms_, max_frames_));
 	}
@@ -40,6 +51,50 @@ namespace comp
 			CloseHandle(log_file_);
 			log_file_ = INVALID_HANDLE_VALUE;
 		}
+		if (harvest_file_ != INVALID_HANDLE_VALUE)
+		{
+			CloseHandle(harvest_file_);
+			harvest_file_ = INVALID_HANDLE_VALUE;
+		}
+	}
+
+	void diagnostics::harvest_draw()
+	{
+		if (!harvest_ps_ || harvest_file_ == INVALID_HANDLE_VALUE) return;
+
+		auto& ffp = shared::common::ffp_state::get();
+		const auto* psmap = shared::common::g_ps_classifier.classify(ffp.last_ps());
+		if (!psmap) return;
+
+		const uint32_t hash = psmap->ps_hash;
+		static std::unordered_set<uint32_t> seen;
+		if (!seen.insert(hash).second) return;  // already harvested this shader
+
+		using shared::common::PsSlotRole;
+		using shared::common::PsSlotMap;
+		auto rs = [&](PsSlotRole r) -> int {
+			uint8_t s = psmap->slot(r);
+			return s == PsSlotMap::kNoSlot ? -1 : static_cast<int>(s);
+		};
+
+		std::string line = std::format(
+			"HARVEST frame={} hash=0x{:08X} is2d={} sky={} posT={} color={} normal={} ntc={} skinned={} bi={} | "
+			"diff=s{} norm=s{} glow=s{} height=s{} decal=s{} lod={} mlc={}\r\n",
+			ffp.frame_count(), hash,
+			comp::game::is_2d() ? 1 : 0,
+			comp::game::is_sky() ? 1 : 0,
+			ffp.cur_decl_has_pos_t() ? 1 : 0,
+			ffp.cur_decl_has_color() ? 1 : 0,
+			ffp.cur_decl_has_normal() ? 1 : 0,
+			ffp.cur_decl_n_texcoords(),
+			ffp.cur_decl_is_skinned() ? 1 : 0,
+			ffp.cur_decl_has_blendindices() ? 1 : 0,
+			rs(PsSlotRole::Diffuse), rs(PsSlotRole::Normal), rs(PsSlotRole::Glow),
+			rs(PsSlotRole::Height), rs(PsSlotRole::Decal),
+			psmap->has_lod_sampler ? 1 : 0, static_cast<int>(psmap->multi_layer_count));
+
+		DWORD written = 0;
+		WriteFile(harvest_file_, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
 	}
 
 	bool diagnostics::is_active() const

@@ -22,6 +22,12 @@ namespace shared::common
 			int terrain_albedo_stage = 1;   // for has_color && n_texcoords >= 2 (HQ terrain / multi-tile blend)
 			int bi_albedo_stage = 1;        // for !skinned && has_blendindices (atlas-tile-selector decls)
 
+			// Skip "fake shadow" overlay draws: NOLIGHTING geometry whose vertex
+			// colors are all grayscale with at least one dark vertex (FNV's baked
+			// planar shadow overlays). Remix ray-traces real shadows, so these are
+			// dropped. Ported from the old standalone proxy's SkipFakeShadows.
+			bool skip_fake_shadows = false;
+
 			// VS constant register layout (hardcoded per-game)
 			// FNV: combined WorldViewProj at c0-c3, World at c8-c11
 			static constexpr int vs_reg_view_start = 0;
@@ -60,6 +66,10 @@ namespace shared::common
 			bool enabled = true;
 			int delay_ms = 50000;
 			int log_frames = 3;
+			// When set, log every pixel shader's hash + draw-shape fingerprint
+			// on first sight to ps_harvest.log (for identifying UI/keep-diffuse
+			// shaders by action sequence). Off in normal builds.
+			bool harvest_ps = false;
 		} diagnostics;
 
 		struct remix_settings
