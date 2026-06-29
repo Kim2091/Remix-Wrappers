@@ -154,6 +154,49 @@ namespace comp
 		}
 	}
 
+	// ---- Camera world position: feeds rtx.atmosphere.cameraWorldOverride so the
+	// procedural cloud volume stays world-anchored. FNV renders camera-relative
+	// (the engine subtracts the camera position out of all geometry/lights — see
+	// game::camera_position_ptr), so Remix's own camera reads as (0,0,0) and the
+	// cloud march, anchored to it, would weld the deck to the view ("follows" the
+	// player in every axis). Pushing the real engine camera position each frame
+	// restores world-anchored clouds + fly-through.
+	namespace camera_push
+	{
+		static bool s_initialized = false;
+		static int  s_frame_count = 0;
+		static constexpr int WARMUP_FRAMES = 120;
+
+		static void init()
+		{
+			s_initialized = true;
+			auto& api = shared::common::remix_api::get();
+			if (api.is_initialized()) {
+				// One-time: have the runtime anchor clouds to the pushed position
+				// instead of its own (zero) camera position.
+				api.m_bridge.SetConfigVariable("rtx.atmosphere.useCameraWorldOverride", "True");
+			}
+		}
+
+		static void update()
+		{
+			auto& api = shared::common::remix_api::get();
+			if (!api.is_initialized()) return;
+			if (s_frame_count < WARMUP_FRAMES) { s_frame_count++; return; }
+			if (!s_initialized) init();
+
+			const float* cp = game::camera_position_ptr;
+			if (!cp) return;
+
+			// Vector3 RtxOption parses "x, y, z" (the rtx.conf format). Raw engine
+			// world units; the runtime applies the same Z-up swap + km scaling it
+			// would to getPosition().
+			char buf[96];
+			snprintf(buf, sizeof(buf), "%.3f, %.3f, %.3f", cp[0], cp[1], cp[2]);
+			api.m_bridge.SetConfigVariable("rtx.atmosphere.cameraWorldOverride", buf);
+		}
+	}
+
 	void on_begin_scene_cb()
 	{
 		if (!tex_addons::initialized) {
@@ -165,6 +208,10 @@ namespace comp
 		else                        sun_cycle::disable();
 		if (cfg.moon_cycle.enabled) moon_cycle::update();
 		else                        moon_cycle::disable();
+
+		// World-anchor the procedural clouds (FNV is camera-relative — see
+		// camera_push). Always on; harmless when clouds/atmosphere are unused.
+		camera_push::update();
 
 		// FNV: init backbuffer tracking on first scene (device is available now)
 		if (game::backbuffer_width == 0)
