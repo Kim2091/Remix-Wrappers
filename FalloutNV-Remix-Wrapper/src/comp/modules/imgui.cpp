@@ -241,6 +241,66 @@ namespace comp
 		ImGui::SameLine();
 		ImGui::TextDisabled("(%s)", ffp.is_ffp_active() ? "ACTIVE" : "inactive");
 
+		// Live A/B for the water route. Off puts water back on the legacy
+		// passthrough+Ignore path (i.e. invisible), which is the comparison
+		// worth being able to make without an alt-tab and relaunch.
+		ImGui::Checkbox("Route Water to FFP", &cfg.ffp.route_water_to_ffp);
+		ImGui::SameLine();
+		ImGui::TextDisabled("(off = water Ignored, as before)");
+
+		// Water's albedo is its NoiseMap, whose alpha channel is meaningless.
+		// Reading opacity from it can make the surface ~fully transparent, which
+		// looks exactly like water still being missing -- so this needs to be
+		// flippable in place to tell the two apart.
+		ImGui::BeginDisabled(!cfg.ffp.route_water_to_ffp);
+		ImGui::Checkbox("Water Force Opaque", &cfg.ffp.water_force_opaque);
+		ImGui::SameLine();
+		ImGui::TextDisabled("(off = alpha from NoiseMap)");
+		ImGui::EndDisabled();
+
+		// Live A/B for the distant-terrain LOD sink. Mode 2 replicates
+		// SLS2002.vso per vertex; mode 1 is the old uniform world-matrix sink
+		// that z-fights inside the loaded rectangle and over-sinks outside it.
+		// Flipping between them in place is the only way to judge the seam.
+		ImGui::Combo("LOD Sink", &cfg.ffp.lod_sink_mode,
+			"Off\0Uniform (legacy LodSinkZ)\0Per-vertex (exact)\0");
+		ImGui::SameLine();
+		ImGui::TextDisabled("(rebuilds/frame: %d, cached: %d)",
+			game::lod_sink::rebuilds_this_frame(), game::lod_sink::cached_entries());
+
+		{
+			// Which LOD class is actually on screen, and did the per-vertex sink
+			// engage? An empty reject reason means it succeeded at least once.
+			const char* rej = game::lod_sink::last_reject_reason();
+			ImGui::TextDisabled("far LOD draws/frame: %d   near LOD draws/frame: %d",
+				game::lod_debug::far_draws(), game::lod_debug::near_draws());
+			if (rej && rej[0])
+				ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f),
+					"per-vertex sink NOT active: %s", rej);
+			else
+				ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "per-vertex sink active");
+		}
+
+		// One-toggle isolation of the z-fight. FAR takes FFP + sink (path-traced);
+		// NEAR is passthrough + Ignore, i.e. RASTERISED only, so it composites
+		// against the path-traced real terrain. Drop one and see which stops it.
+		// Driven by global hotkeys too (see lod_debug::poll_hotkeys) because the
+		// overlay is read-only in this setup.
+		ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f),
+			"HOTKEYS  F6 = drop FAR LOD   F7 = near LOD mode   F8 = sink mode");
+		ImGui::Combo("Near LOD (rasterised)  [F7]", &cfg.ffp.near_lod_mode,
+			"Passthrough (legacy, z-fights)\0Dropped (default)\0");
+		ImGui::Checkbox("DBG: drop FAR LOD (path-traced)  [F6]", &cfg.ffp.debug_drop_far_lod);
+
+		if (cfg.ffp.lod_sink_mode == 1)
+			ImGui::DragFloat("LodSinkZ (uniform only)", &cfg.ffp.lod_sink_z, 1.0f, -1.0f, 1000.0f);
+
+		// Needs a dxvk-remix build that decodes kRemixMultiLayerTerrainBit
+		// (fnv-terrain-ffp / fnv-ffp). On any other runtime this routes NO
+		// textures rather than falling back, so it is off by default.
+		ImGui::Checkbox("Multi-layer terrain (needs fnv-terrain-ffp runtime)",
+			&cfg.ffp.multi_layer_terrain);
+
 		ImGui::Separator();
 
 		// State overview
@@ -477,7 +537,25 @@ namespace comp
 		{
 			ImGui::PopStyleColor();
 			ImGui::PopStyleVar(1);
-			ADD_TAB("FFP", tab_ffp);
+			// Force FFP selected the first time the overlay opens. ImGui persists
+			// the last active tab in imgui.ini, and the overlay is currently
+			// read-only here (game input conflict), so a stale persisted tab
+			// would be unrecoverable.
+			{
+				static bool s_forced_ffp = false;
+				ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 0)));
+				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x + 12.0f, 8));
+				const ImGuiTabItemFlags ffp_flags = s_forced_ffp ? 0 : ImGuiTabItemFlags_SetSelected;
+				if (ImGui::BeginTabItem("FFP", nullptr, ffp_flags)) {
+					s_forced_ffp = true;
+					ImGui::PopStyleVar(1);
+					if (ImGui::BeginChild("##child_FFP", ImVec2(0, ImGui::GetContentRegionAvail().y - 38), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_AlwaysVerticalScrollbar)) {
+						tab_ffp(); ImGui::EndChild();
+					} else {
+						ImGui::EndChild();
+					} ImGui::EndTabItem();
+				} else { ImGui::PopStyleVar(1); } ImGui::PopStyleColor();
+			}
 			ADD_TAB("Tracer", tab_tracer);
 			ADD_TAB("Dev", tab_dev);
 			ADD_TAB("About", tab_about);

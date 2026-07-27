@@ -65,6 +65,18 @@ namespace shared::common
 		// so dxvk-remix reads textures[0..6] as albedos and textures[7..13] as normals.
 		void setup_albedo_texture_preserve_slots(IDirect3DDevice9* dev);
 
+		// Explicit-stage bind: puts cur_texture_[stage] at slot 0 and leaves
+		// slots 1-7 exactly as the game bound them.
+		//
+		// Used by the water route, where neither the AlbedoStage config nor the
+		// decl-shape heuristic can name the right texture -- water's albedo is
+		// whichever slot its pixel shader declared NoiseMap at, which the PS
+		// classifier reports per shader. Leaving 1-7 bound is safe because
+		// setup_texture_stages sets COLOROP=DISABLE on them (so they cannot
+		// affect FFP rasterisation) while dxvk-remix still reads them straight
+		// out of device state via the RS-149 payload.
+		void setup_albedo_texture_stage_preserve(IDirect3DDevice9* dev, int stage);
+
 		// Restore original texture bindings on all 8 stages. Call after draw.
 		void restore_textures(IDirect3DDevice9* dev);
 
@@ -146,9 +158,12 @@ namespace shared::common
 		int cur_decl_blend_weight_type() const { return cur_decl_blend_weight_type_; }
 		int cur_decl_blend_indices_off() const { return cur_decl_blend_indices_off_; }
 		int cur_decl_pos_off() const { return cur_decl_pos_off_; }
+		int cur_decl_pos_type() const { return cur_decl_pos_type_; }
 		int cur_decl_normal_off() const { return cur_decl_normal_off_; }
 		int cur_decl_normal_type() const { return cur_decl_normal_type_; }
 		int cur_decl_texcoord_off() const { return cur_decl_texcoord_off_; }
+		int cur_decl_texcoord1_off() const { return cur_decl_texcoord1_off_; }
+		int cur_decl_texcoord1_type() const { return cur_decl_texcoord1_type_; }
 
 		void increment_draw_count() { draw_call_count_++; }
 
@@ -195,6 +210,9 @@ namespace shared::common
 		bool cur_decl_has_pos_t_ = false;
 		int cur_decl_texcoord_type_ = -1;
 		int cur_decl_texcoord_off_ = 0;
+		// TEXCOORD1 (stream 0). -1 offset means the decl has no TEXCOORD1.
+		int cur_decl_texcoord1_type_ = -1;
+		int cur_decl_texcoord1_off_ = -1;
 		int cur_decl_n_texcoords_ = 0;
 
 		// Skinning-related declaration data
@@ -203,6 +221,7 @@ namespace shared::common
 		int cur_decl_blend_weight_type_ = 0;
 		int cur_decl_blend_indices_off_ = 0;
 		int cur_decl_pos_off_ = 0;
+		int cur_decl_pos_type_ = -1;
 		int cur_decl_normal_off_ = 0;
 		int cur_decl_normal_type_ = -1;
 

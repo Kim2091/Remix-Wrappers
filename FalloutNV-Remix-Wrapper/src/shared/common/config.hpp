@@ -31,6 +31,28 @@ namespace shared::common
 			// Toggle in [FFP] RouteLodToFfp to A/B without a rebuild.
 			bool route_lod_to_ffp = true;
 
+			// Route FNV's WATER shader family through FFP instead of
+			// passthrough+Ignore. Water declares no BaseMap/DiffuseMap/TexMap
+			// sampler, so without this it fails the Diffuse-role gate and is
+			// tagged Ignore -- the path tracer skips it and water is absent
+			// from the image.
+			//   ON  -> water is FFP-converted and path-traced, using its
+			//          NoiseMap as the albedo (its only non-render-target
+			//          texture, hence the only stable hash to key a Remix
+			//          material replacement on).
+			//   OFF -> legacy passthrough+Ignore (water invisible).
+			// Toggle in [FFP] RouteWaterToFfp, or live in the ImGui FFP tab.
+			bool route_water_to_ffp = true;
+
+			// Force water's FFP surface opaque instead of taking alpha from the
+			// NoiseMap. That texture's alpha channel carries nothing meaningful,
+			// and reading opacity from it can resolve the whole water surface to
+			// ~zero alpha -- indistinguishable from water being missing. Also
+			// tags IgnoreAlphaChannel so Remix doesn't re-derive the same
+			// near-zero opacity from the albedo on its own side.
+			// Turn off only to confirm alpha is (or isn't) the culprit.
+			bool water_force_opaque = true;
+
 			// Approximate the engine's per-vertex LOD sink for no-normal terrain
 			// LOD routed through FFP. The game's LOD VS lowers vertices that fall
 			// inside the loaded-cell range (GeomorphParams.y, c19.y) so the coarse
@@ -40,6 +62,44 @@ namespace shared::common
 			//   == 0 -> disabled (no sink; coarse LOD will poke through).
 			//   > 0  -> fixed sink in world units (manual override / tuning).
 			float lod_sink_z = -1.0f;
+			// 0 = no LOD sink, 1 = legacy uniform world-matrix sink (LodSinkZ),
+			// 2 = per-vertex sink replicating SLS2002.vso exactly (default).
+			// Mode 2 falls back to mode 1 when a draw's decl/constants can't be
+			// used, so it is never worse than the legacy path.
+			int lod_sink_mode = 2;
+			// Hand FNV's multi-layer terrain (BaseMap[2..7] blended by vertex
+			// colour) to dxvk-remix instead of collapsing it to layer 0.
+			// Requires a runtime that decodes kRemixMultiLayerTerrainBit --
+			// dxvk-remix branch fnv-terrain-ffp or fnv-ffp. OFF against any
+			// other build, where it would route no textures at all.
+			bool multi_layer_terrain = false;
+
+			// What to do with FNV's WITH-NORMAL near land LOD (PS 0x6626FACE,
+			// VS SLS2080). Confirmed in-game as the source of the distant-terrain
+			// z-fight: it takes passthrough + Ignore, so it is RASTERISED only and
+			// composites against the path-traced real terrain.
+			//
+			// Its vertex shader fades it by horizontal distance from a blend centre:
+			//   dist  = length(POSITION.xy - LandBlendParams.zw)      (c19.zw)
+			//   alpha = 1 - saturate((9625.59961 - dist) * 0.000375600968)
+			// (both magic numbers are `def` immediates baked into the variant)
+			// i.e. alpha 0 within ~6964 units of the centre, ramping to 1 beyond
+			// ~9626. It is deliberately invisible anywhere near the player -- it
+			// exists purely as a raster-era cross-fade into the far LOD, which the
+			// path tracer does not need.
+			//
+			//   0 = passthrough + Ignore (legacy; rasterises and z-fights)
+			//   1 = drop the draw entirely (default)
+			// A mode 2 that routes it through FFP with the fade evaluated per
+			// vertex into a diffuse alpha would need an expanded VB plus a cloned
+			// declaration -- the decl carries only POSITION + TEXCOORD0, so there
+			// is no COLOR element to write the fade into. Only worth building if
+			// mode 1 leaves visible gaps at distance.
+			int near_lod_mode = 1;
+
+			// Debug isolation for the far LOD (no-normal, PS 0x36E87D02), which
+			// takes FFP + per-vertex sink and IS path-traced. ImGui/hotkey only.
+			bool debug_drop_far_lod = false;
 
 			// Skip "fake shadow" overlay draws: NOLIGHTING geometry whose vertex
 			// colors are all grayscale with at least one dark vertex (FNV's baked

@@ -63,7 +63,14 @@ namespace shared::common
 		if (ffp.bi_albedo_stage < 0 || ffp.bi_albedo_stage > 7) ffp.bi_albedo_stage = 1;
 		ffp.skip_fake_shadows = get_bool("FFP", "SkipFakeShadows", false);
 		ffp.route_lod_to_ffp = get_bool("FFP", "RouteLodToFfp", true);
+		ffp.route_water_to_ffp = get_bool("FFP", "RouteWaterToFfp", true);
+		ffp.water_force_opaque = get_bool("FFP", "WaterForceOpaque", true);
 		ffp.lod_sink_z = get_float("FFP", "LodSinkZ", -1.0f);
+		ffp.lod_sink_mode = get_int("FFP", "LodSinkMode", 2);
+		if (ffp.lod_sink_mode < 0 || ffp.lod_sink_mode > 2) ffp.lod_sink_mode = 2;
+		ffp.multi_layer_terrain = get_bool("FFP", "MultiLayerTerrain", false);
+		ffp.near_lod_mode = get_int("FFP", "NearLodMode", 1);
+		if (ffp.near_lod_mode < 0 || ffp.near_lod_mode > 1) ffp.near_lod_mode = 1;
 
 		// [Skinning]
 		skinning.enabled = get_bool("Skinning", "Enabled", false);
@@ -93,8 +100,9 @@ namespace shared::common
 		moon_cycle.enabled = get_bool("MoonCycle", "Enabled", true);
 
 		log("Config", std::format("Loaded from: {}", ini_path_));
-		log("Config", std::format("FFP={} AlbedoStage={} TerrainAlbedoStage={} BIAlbedoStage={} RouteLodToFfp={}",
-			ffp.enabled ? 1 : 0, ffp.albedo_stage, ffp.terrain_albedo_stage, ffp.bi_albedo_stage, ffp.route_lod_to_ffp ? 1 : 0));
+		log("Config", std::format("FFP={} AlbedoStage={} TerrainAlbedoStage={} BIAlbedoStage={} RouteLodToFfp={} RouteWaterToFfp={}",
+			ffp.enabled ? 1 : 0, ffp.albedo_stage, ffp.terrain_albedo_stage, ffp.bi_albedo_stage,
+			ffp.route_lod_to_ffp ? 1 : 0, ffp.route_water_to_ffp ? 1 : 0));
 		if (skinning.enabled)
 			log("Config", "Skinning ENABLED", LOG_TYPE::LOG_TYPE_WARN);
 		if (culling.enabled)

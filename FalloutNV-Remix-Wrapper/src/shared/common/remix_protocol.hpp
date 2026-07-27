@@ -35,12 +35,31 @@ namespace remix_protocol {
 	// Only the bits the wrapper actually drives are listed here; extend as
 	// needed. Keep the enum-value-to-bit-position math identical to the
 	// upstream enum order or the routing breaks.
+	// Bit positions counted from the upstream enum order in rtx_types.h:
+	//   0 WorldUI, 1 WorldMatte, 2 Sky, 3 Ignore, 4 IgnoreLights,
+	//   5 IgnoreAntiCulling, 6 IgnoreMotionBlur, 7 IgnoreOpacityMicromap,
+	//   8 IgnoreAlphaChannel, 9 Hidden, 10 Particle, 11 Beam, 12 DecalStatic,
+	//   13 DecalDynamic, 14 DecalSingleOffset, 15 DecalNoOffset,
+	//   16 AlphaBlendToCutout, 17 Terrain, 18 AnimatedWater.
+	// DecalStatic=12 is the cross-check that this counting is still in sync.
 	enum class CategoryBit : uint32_t {
 		WorldUI = 0,
 		WorldMatte = 1,
 		Sky = 2,
 		Ignore = 3,
+		// Tells Remix not to treat the albedo texture's alpha channel as
+		// opacity. FNV's water albedo is its NoiseMap, whose alpha carries
+		// nothing meaningful -- without this the path tracer can resolve the
+		// whole water surface to ~zero opacity, which looks identical to the
+		// draw having been culled.
+		IgnoreAlphaChannel = 8,
 		DecalStatic = 12,
+		// Pairs with rtx.animatedWaterTextures. Remix animates the primary
+		// texcoords and takes a second normal-map sample for draws in this
+		// category -- but only once the draw resolves to a TRANSLUCENT
+		// material, which for FNV means a material replacement keyed on the
+		// water albedo hash. Harmless (a no-op) until then.
+		AnimatedWater = 18,
 	};
 
 	inline constexpr uint32_t category_mask(CategoryBit b) {

@@ -52,6 +52,31 @@ namespace shared::common
 		// The renderer uses this to skip RT and let rasterisation handle them.
 		bool has_lod_sampler = false;
 
+		// True iff the PS belongs to FNV's WATER shader family.
+		//
+		// No WATER variant declares BaseMap / DiffuseMap / TexMap, so without
+		// this signal every water draw fails the Diffuse-role gate in the
+		// renderer, gets tagged InstanceCategories::Ignore, and disappears from
+		// the path-traced image entirely.
+		//
+		// Signature (verified against all 16 shipped shaderpackage*.sdp files):
+		// ReflectionMap / RefractionMap / DepthMap / DisplacementMap are each
+		// declared by the WATER family and by nothing else. NoiseMap is shared
+		// with two ImageSpace post-process shaders (ISNOISENORMALMAP,
+		// ISNOISESCROLLANDBLEND), but those bind it at s0 while WATER always
+		// binds it at s2 -- so the slot disambiguates.
+		bool has_water_sampler = false;
+
+		// The slot WATER declared NoiseMap at (s2 in every shipped variant).
+		// Water's other samplers are render targets whose contents change every
+		// frame -- ReflectionMap, RefractionMap and DepthMap all hash differently
+		// per frame, which would defeat any Remix material replacement. NoiseMap
+		// is water's only *static* texture, so it is both the FFP albedo and the
+		// stable hash a translucent water material can be keyed on.
+		// kNoSlot when the variant declares no NoiseMap; the renderer then
+		// declines the water route and leaves legacy behaviour untouched.
+		uint8_t water_albedo_slot = kNoSlot;
+
 		// Multi-layer terrain (PS declares BaseMap[N] for N >= 2 alongside a
 		// matching NormalMap[N] at samplers s7..s(7+N-1)). 0 means "not multi-
 		// layer terrain"; values 2-7 mean "N layers detected." See the multi-
@@ -215,6 +240,11 @@ namespace shared::common
 			std::string summary;
 			UINT sampler_count = 0;
 
+			// WATER binds NoiseMap here in every shipped variant; the two
+			// ImageSpace shaders that also declare a NoiseMap bind it at s0.
+			constexpr uint32_t kWaterNoiseSlot = 2;
+			uint8_t noise_slot = PsSlotMap::kNoSlot;
+
 			for (UINT i = 0; i < tdesc.Constants; i++) {
 				D3DXHANDLE h = table->GetConstant(nullptr, i);
 				if (!h) continue;
@@ -242,6 +272,23 @@ namespace shared::common
 					map.has_lod_sampler = true;
 				}
 
+				// WATER-family detection (see PsSlotMap::has_water_sampler).
+				// Also independent of the role check -- water declares no
+				// Diffuse-role sampler at all, which is precisely why it needs
+				// its own signal to avoid being tagged Ignore.
+				if (cdesc.Name) {
+					if (std::strcmp(cdesc.Name, "ReflectionMap") == 0 ||
+						std::strcmp(cdesc.Name, "RefractionMap") == 0 ||
+						std::strcmp(cdesc.Name, "DepthMap") == 0 ||
+						std::strcmp(cdesc.Name, "DisplacementMap") == 0) {
+						map.has_water_sampler = true;
+					}
+					else if (std::strcmp(cdesc.Name, "NoiseMap") == 0) {
+						noise_slot = static_cast<uint8_t>(slot);
+						if (slot == kWaterNoiseSlot) map.has_water_sampler = true;
+					}
+				}
+
 				if (role == PsSlotRole::Other) continue;
 
 				// First-claim wins per role. With FNV's content this is unique
@@ -260,6 +307,14 @@ namespace shared::common
 				if (role == PsSlotRole::Diffuse && cdesc.RegisterCount > 1 && map.multi_layer_count == 0) {
 					map.multi_layer_count = static_cast<uint8_t>(cdesc.RegisterCount);
 				}
+			}
+
+			// Water's albedo is its NoiseMap -- the only sampler in the family
+			// that isn't a per-frame render target. A WATER variant with no
+			// NoiseMap leaves this at kNoSlot and the renderer declines the
+			// water route rather than guessing at a render target.
+			if (map.has_water_sampler) {
+				map.water_albedo_slot = noise_slot;
 			}
 
 			if (map.multi_layer_count > 0) {
@@ -298,7 +353,7 @@ namespace shared::common
 					LOG_TYPE::LOG_TYPE_DEFAULT);
 			} else {
 				log("PSReflect",
-					std::format("PS 0x{:08X} ({} samplers): {} [diff=s{} norm=s{} glow=s{} height=s{} decal=s{} lod={} mlc={}]",
+					std::format("PS 0x{:08X} ({} samplers): {} [diff=s{} norm=s{} glow=s{} height=s{} decal=s{} lod={} water={} wtex=s{} mlc={}]",
 						hash, sampler_count, summary,
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Diffuse)],
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Normal)],
@@ -306,6 +361,8 @@ namespace shared::common
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Height)],
 						map.slot_for_role[static_cast<size_t>(PsSlotRole::Decal)],
 						map.has_lod_sampler ? '1' : '0',
+						map.has_water_sampler ? '1' : '0',
+						map.water_albedo_slot,
 						map.multi_layer_count),
 					LOG_TYPE::LOG_TYPE_GREEN);
 			}

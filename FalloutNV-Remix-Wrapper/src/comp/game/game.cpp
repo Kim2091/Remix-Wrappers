@@ -220,6 +220,10 @@ namespace comp::game
 
 	void on_frame_end()
 	{
+		lod_sink::on_present();
+		lod_debug::on_present();
+		lod_debug::poll_hotkeys();
+
 		if (++g_shadow_cache_frame >= SHADOW_CACHE_FLUSH_FRAMES)
 		{
 			g_shadow_cache_frame = 0;
@@ -737,6 +741,7 @@ namespace comp::game
 	{
 		release_skin_cache();
 		clear_fake_shadow_cache();
+		lod_sink::release_cache();
 
 		// Reset destroys the swap chain; the old backbuffer address is dead and
 		// a resolution change invalidates the cached extents. Zeroing the width

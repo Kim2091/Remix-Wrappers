@@ -161,12 +161,15 @@ namespace shared::common
 		cur_decl_has_pos_t_ = false;
 		cur_decl_texcoord_type_ = -1;
 		cur_decl_texcoord_off_ = 0;
+		cur_decl_texcoord1_type_ = -1;
+		cur_decl_texcoord1_off_ = -1;
 		cur_decl_n_texcoords_ = 0;
 		cur_decl_num_weights_ = 0;
 		cur_decl_blend_weight_off_ = 0;
 		cur_decl_blend_weight_type_ = 0;
 		cur_decl_blend_indices_off_ = 0;
 		cur_decl_pos_off_ = 0;
+		cur_decl_pos_type_ = -1;
 		cur_decl_normal_off_ = 0;
 		cur_decl_normal_type_ = -1;
 
@@ -209,7 +212,10 @@ namespace shared::common
 
 			case D3DDECLUSAGE_POSITION:
 				if (el.Stream == 0)
+				{
 					cur_decl_pos_off_ = el.Offset;
+					cur_decl_pos_type_ = el.Type;
+				}
 				break;
 
 			case D3DDECLUSAGE_NORMAL:
@@ -228,6 +234,13 @@ namespace shared::common
 					cur_decl_has_texcoord_ = true;
 					cur_decl_texcoord_type_ = el.Type;
 					cur_decl_texcoord_off_ = el.Offset;
+				}
+				// TEXCOORD1.x carries the coarse-LOD Z that the distant-terrain
+				// vertex shader (SLS2002) geomorphs against. lod_sink needs it.
+				else if (el.UsageIndex == 1 && el.Stream == 0)
+				{
+					cur_decl_texcoord1_type_ = el.Type;
+					cur_decl_texcoord1_off_ = el.Offset;
 				}
 				break;
 
@@ -424,6 +437,23 @@ namespace shared::common
 		dev->SetTexture(0, albedo);
 		// INTENTIONALLY does NOT null slots 1-7 — dxvk-remix's multi-layer
 		// capture reads d3d9State.textures[1..13] directly for albedos+normals.
+	}
+
+	void ffp_state::setup_albedo_texture_stage_preserve(IDirect3DDevice9* dev, int stage)
+	{
+		PROFILE_ZONE_N("ffp::setup_albedo_tex_stage");
+		if (!dev) return;
+
+		auto* albedo = (stage >= 0 && stage < 8) ? cur_texture_[stage] : cur_texture_[0];
+
+		stage0_changed_ = (albedo != cur_texture_[0]);
+		last_albedo_stage0_ = albedo;
+		dev->SetTexture(0, albedo);
+
+		// Mark 1-7 as kept-bound: this path never nulled them, so restore_textures
+		// has nothing to undo and would otherwise emit 7 redundant SetTexture
+		// calls per draw rewriting each slot with the value it already holds.
+		kept_bound_mask_ = 0xFE;
 	}
 
 	void ffp_state::note_stage0_override(IDirect3DBaseTexture9* tex)

@@ -181,6 +181,22 @@ namespace comp
 		return map && map->has_lod_sampler;
 	}
 
+	// Returns true iff this draw should take the dedicated water route: the PS
+	// is in FNV's WATER family AND it declared a NoiseMap we can use as the
+	// albedo. Water declares no Diffuse-role sampler, so without this the draw
+	// falls into PASS_NO_DIFFUSE_ROLE, gets tagged Ignore, and never reaches the
+	// path tracer -- water simply isn't in the image.
+	//
+	// A WATER variant with no NoiseMap (none ship that way, but the classifier
+	// doesn't assume it) returns false and keeps the old behaviour rather than
+	// binding one of water's render targets as an albedo.
+	static bool ps_is_water_shader(const shared::common::PsSlotMap* map)
+	{
+		return map && map->has_water_sampler
+			&& map->water_albedo_slot != shared::common::PsSlotMap::kNoSlot
+			&& shared::common::config::get().ffp.route_water_to_ffp;
+	}
+
 	// Track whether the device's WORLD matrix is currently identity, so
 	// back-to-back passthrough draws skip the redundant SetTransform.
 	// fnv_engage clears it (game::apply_transforms writes a non-identity
@@ -235,6 +251,167 @@ namespace comp
 		}
 	}
 
+	/*
+	 * One-shot-per-shader report of the gate state a water draw arrives with.
+	 *
+	 * A water draw that still doesn't reach the screen can be failing at any of
+	 * several points: an earlier branch in the routing chain eating it, a null
+	 * albedo at the NoiseMap slot, or Remix dropping it after we hand it over.
+	 * This logs every gate input the first time each water PS is seen at a draw
+	 * call, so the failing stage is identifiable straight from logfile.txt.
+	 *
+	 * Pair with the WATER-EXEC line in setup_water_draw: a GATE line with no
+	 * matching EXEC line means the routing chain consumed the draw before the
+	 * water branch, and the flags on the GATE line say which branch did it.
+	 *
+	 * Cost on the hot path is a single pointer compare -- the classifier lookup
+	 * only runs when the bound PS changed since the previous draw, and the set
+	 * insert only ever runs for water shaders.
+	 */
+	static void log_water_gate_once()
+	{
+		auto& ffp = shared::common::ffp_state::get();
+		auto* ps = ffp.last_ps();
+
+		static IDirect3DPixelShader9* s_prev_ps = reinterpret_cast<IDirect3DPixelShader9*>(1);
+		if (ps == s_prev_ps) return;
+		s_prev_ps = ps;
+
+		const auto* map = shared::common::g_ps_classifier.classify(ps);
+		if (!map || !map->has_water_sampler) return;
+
+		static std::unordered_set<uint32_t> s_logged;
+		if (!s_logged.insert(map->ps_hash).second) return;
+
+		const uint8_t slot = map->water_albedo_slot;
+		const bool have_tex = (slot != shared::common::PsSlotMap::kNoSlot)
+			&& (ffp.cur_texture(slot) != nullptr);
+
+		shared::common::log("Water", std::format(
+			"GATE PS 0x{:08X} wtex=s{} tex={} | backbuf={} vp={} 2d={} skinned={} posT={} sky={} normal={} cfg={}",
+			map->ps_hash, slot, have_tex ? "OK" : "NULL",
+			game::rendering_to_backbuffer ? 1 : 0,
+			ffp.view_proj_valid() ? 1 : 0,
+			game::is_2d() ? 1 : 0,
+			ffp.cur_decl_is_skinned() ? 1 : 0,
+			ffp.cur_decl_has_pos_t() ? 1 : 0,
+			game::is_sky() ? 1 : 0,
+			ffp.cur_decl_has_normal() ? 1 : 0,
+			shared::common::config::get().ffp.route_water_to_ffp ? 1 : 0),
+			shared::common::LOG_TYPE::LOG_TYPE_GREEN);
+	}
+
+	/*
+	 * Shared water draw setup: FFP-engage, bind the NoiseMap albedo, write the
+	 * protocol. Split out so the indexed and non-indexed paths can't drift.
+	 *
+	 * The RS-149 payload names water's real device slots -- NoiseMap as the
+	 * diffuse and, on the variants that declare one, NormalMap. dxvk-remix reads
+	 * those slots straight from device state, so slots 1-7 must stay bound;
+	 * setup_albedo_texture_stage_preserve is what guarantees that.
+	 *
+	 * Caller must follow the draw with remix_protocol::reset_all_slots +
+	 * ffp.restore_textures.
+	 */
+	static void setup_water_draw(IDirect3DDevice9* dev, const shared::common::PsSlotMap* psmap)
+	{
+		auto& ffp = shared::common::ffp_state::get();
+
+		fnv_engage(dev);
+		game::disable_skinning(dev);
+
+		const uint8_t albedoSlot = psmap->water_albedo_slot;
+
+		// One-shot confirmation that the route actually ran, with the albedo we
+		// resolved. See log_water_gate_once for how to read this against GATE.
+		//
+		// Also reports the albedo's pixel format and the device's alpha/blend
+		// state. If water is still absent with WaterForceOpaque on, these say
+		// whether opacity was ever the problem: a format with no alpha channel
+		// (e.g. DXT1 / X8R8G8B8) rules the alpha theory out and points at
+		// rtx.ignoreTextures instead.
+		{
+			static std::unordered_set<uint32_t> s_execed;
+			if (s_execed.insert(psmap->ps_hash).second) {
+				D3DFORMAT fmt = D3DFMT_UNKNOWN;
+				UINT tw = 0, th = 0;
+				if (auto* base = ffp.cur_texture(albedoSlot)) {
+					IDirect3DTexture9* t2d = nullptr;
+					if (SUCCEEDED(base->QueryInterface(IID_IDirect3DTexture9,
+							reinterpret_cast<void**>(&t2d))) && t2d) {
+						D3DSURFACE_DESC sd = {};
+						if (SUCCEEDED(t2d->GetLevelDesc(0, &sd))) {
+							fmt = sd.Format; tw = sd.Width; th = sd.Height;
+						}
+						t2d->Release();
+					}
+				}
+
+				DWORD blend = 0, srcb = 0, dstb = 0, atest = 0, aref = 0;
+				dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+				dev->GetRenderState(D3DRS_SRCBLEND, &srcb);
+				dev->GetRenderState(D3DRS_DESTBLEND, &dstb);
+				dev->GetRenderState(D3DRS_ALPHATESTENABLE, &atest);
+				dev->GetRenderState(D3DRS_ALPHAREF, &aref);
+
+				shared::common::log("Water", std::format(
+					"EXEC PS 0x{:08X} albedo=s{} tex={} norm=s{} | fmt={} {}x{} | "
+					"blend={} src={} dst={} atest={} aref={} forceOpaque={}",
+					psmap->ps_hash, albedoSlot,
+					ffp.cur_texture(albedoSlot) ? "OK" : "NULL",
+					psmap->slot(shared::common::PsSlotRole::Normal),
+					static_cast<int>(fmt), tw, th,
+					blend, srcb, dstb, atest, aref,
+					shared::common::config::get().ffp.water_force_opaque ? 1 : 0),
+					shared::common::LOG_TYPE::LOG_TYPE_GREEN);
+			}
+		}
+
+		ffp.setup_albedo_texture_stage_preserve(dev, static_cast<int>(albedoSlot));
+
+		uint32_t water_categories =
+			remix_protocol::category_mask(remix_protocol::CategoryBit::AnimatedWater);
+
+		/*
+		 * Force the surface opaque.
+		 *
+		 * fnv_engage leaves stage 0 at ALPHAOP=SELECTARG1 / ALPHAARG1=TEXTURE,
+		 * which is right for foliage cutouts but wrong here: water's albedo is
+		 * its NoiseMap, and that texture's alpha channel carries nothing
+		 * meaningful. Taking opacity from it can resolve the entire water
+		 * surface to ~zero alpha, which is visually identical to the draw never
+		 * having been submitted -- the exact symptom this route was added to
+		 * fix, reappearing one stage further down the pipe.
+		 *
+		 * Two halves, because the alpha reaches the image by two routes:
+		 *   - rasterisation: take alpha from TFACTOR (white) instead of the
+		 *     texture. TFACTOR's D3D9 default is already 0xFFFFFFFF, so setting
+		 *     it needs no save/restore, and fnv_engage rewrites ALPHAARG1 on
+		 *     every FFP draw, so the override cannot leak to the next one.
+		 *   - path tracing: IgnoreAlphaChannel, so Remix doesn't re-derive the
+		 *     same ~zero opacity from the albedo texture it samples itself.
+		 *
+		 * Translucency is not lost by this -- it was never present. It arrives
+		 * with a material replacement keyed on the NoiseMap hash, which is why
+		 * a stable albedo hash mattered in the first place.
+		 */
+		if (shared::common::config::get().ffp.water_force_opaque)
+		{
+			dev->SetRenderState(D3DRS_TEXTUREFACTOR, D3DCOLOR_ARGB(255, 255, 255, 255));
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TFACTOR);
+			water_categories |=
+				remix_protocol::category_mask(remix_protocol::CategoryBit::IgnoreAlphaChannel);
+		}
+
+		remix_protocol::set_category_flags(dev, water_categories);
+		remix_protocol::set_modifier(dev,
+			remix_protocol::encode_slot_roles(
+				albedoSlot,
+				psmap->slot(shared::common::PsSlotRole::Normal),
+				remix_protocol::kSlotAbsent,
+				remix_protocol::kSlotAbsent));
+	}
+
 
 	// ----
 
@@ -274,15 +451,35 @@ namespace comp
 		/*
 		 * FNV DrawPrimitive routing (ported from WD_DrawPrimitive):
 		 *   viewProjValid AND has decl AND !POSITIONT AND !skinned
-		 *   AND (hasNormal OR isSky) AND !is2D -> FFP
+		 *   AND (hasNormal OR isSky OR isWater) AND !is2D -> FFP
 		 *   Else -> passthrough
 		 */
+
+		// One classifier lookup per draw, shared by the gate below and every
+		// helper inside it. Hoisted out of the branch because the water test is
+		// part of the gate itself -- water's vertex declaration may carry no
+		// NORMAL, and without this it would fail the hasNormal term and never
+		// reach the FFP side at all.
+		const auto* psmap = shared::common::g_ps_classifier.classify(ffp.last_ps());
+		const bool is_water = ps_is_water_shader(psmap);
+
 		if (ffp.is_enabled() && ffp.view_proj_valid() && game::rendering_to_backbuffer &&
 			ffp.last_decl() && !ffp.cur_decl_has_pos_t() && !ffp.cur_decl_is_skinned() &&
-			(ffp.cur_decl_has_normal() || game::is_sky()) && !game::is_2d())
+			(ffp.cur_decl_has_normal() || game::is_sky() || is_water) && !game::is_2d())
 		{
-			// One classifier lookup per draw, shared across all helpers below.
-			const auto* psmap = shared::common::g_ps_classifier.classify(ffp.last_ps());
+			// Water gets the same dedicated route as the indexed path -- tested
+			// first so it can't be captured by the no-diffuse-role Ignore branch.
+			if (is_water)
+			{
+				setup_water_draw(dev, psmap);
+				hr = dev->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
+				remix_protocol::reset_all_slots(dev);
+				ffp.restore_textures(dev);
+				im->m_stats._drawcall_prim.track_single();
+				ctx.restore_all(dev);
+				ctx.reset_context();
+				return hr;
+			}
 
 			// Non-sky draws whose PS has no diffuse role identified are FX /
 			// normal-only / environment-cubemap shaders; engaging FFP would
@@ -369,6 +566,8 @@ namespace comp
 			ctx.reset_context();
 			return S_OK;
 		}
+
+		log_water_gate_once();
 
 		// Drop FNV fake-shadow overlays (NOLIGHTING + all-gray vertex colors);
 		// Remix ray-traces real shadows. Keep-listed PSes (Pip-Boy) are spared.
@@ -463,6 +662,23 @@ namespace comp
 			ffp.restore_textures(dev);
 			im->m_stats._drawcall_indexed_prim.track_single();
 		}
+		else if (ps_is_water_shader(shared::common::g_ps_classifier.classify(ffp.last_ps())))
+		{
+			// Water must be tested BEFORE the no-normal and no-diffuse-role gates
+			// below: FNV's water declares no BaseMap/DiffuseMap/TexMap sampler, so
+			// it would otherwise land in PASS_NO_DIFFUSE_ROLE and be tagged Ignore
+			// -- the path tracer would skip it and water would be missing from the
+			// image. Its albedo is the PS's own NoiseMap slot, which is why this
+			// route can't use the AlbedoStage heuristic.
+			PROFILE_ZONE_N("route_FFP_WATER");
+			if (diag) diag->route("FFP_WATER");
+			const auto* psmap = shared::common::g_ps_classifier.classify(ffp.last_ps());
+			setup_water_draw(dev, psmap);
+			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+			remix_protocol::reset_all_slots(dev);
+			ffp.restore_textures(dev);
+			im->m_stats._drawcall_indexed_prim.track_single();
+		}
 		else if (!ffp.cur_decl_has_normal() &&
 			!(shared::common::config::get().ffp.route_lod_to_ffp &&
 			  ps_is_lod_shader(shared::common::g_ps_classifier.classify(ffp.last_ps()))))
@@ -523,6 +739,23 @@ namespace comp
 				// Tag Ignore so the path tracer skips RT -- rasterisation is output.
 				PROFILE_ZONE_N("route_PASS_LOD_SHADER");
 				if (diag) diag->route("PASS_LOD_SHADER");
+				game::lod_debug::count_near();
+
+				// The with-normal near LOD is rasterise-only (Ignore) and fights
+				// the path-traced terrain it overlaps. Its own vertex shader fades
+				// it to alpha 0 anywhere within ~6964 units of the blend centre,
+				// so near the player it is contributing nothing but the z-fight.
+				// Drop it. Gated on has_normal so that RouteLodToFfp=0 -- which
+				// sends BOTH LOD classes down this branch -- still draws the far
+				// LOD normally. See config.hpp near_lod_mode for the full fade.
+				if (shared::common::config::get().ffp.near_lod_mode == 1 &&
+					ffp.cur_decl_has_normal())
+				{
+					ctx.restore_all(dev);
+					ctx.reset_context();
+					return S_OK;
+				}
+
 				fnv_disengage(dev);
 				remix_protocol::set_category_flags(dev,
 					remix_protocol::category_mask(remix_protocol::CategoryBit::Ignore));
@@ -544,35 +777,99 @@ namespace comp
 				// stage 0 from prior LOD-passthrough draws. Multi-layer terrain
 				// flows through this same path -- one of its layer textures becomes
 				// the surface albedo and the path tracer treats it as single-layer.
-				if (diag) diag->route(is_terrain_shape ? "FFP_TERRAIN" : is_bi_shape ? "FFP_BI" : "FFP_WORLD");
+				// FNV terrain blends up to 7 BaseMap layers weighted by vertex
+				// COLOR0.rgb + COLOR1.x (proven from the SLS terrain PS
+				// disassembly: BaseMap[N] at s0..s(N-1), NormalMap[N] at s7+).
+				// The single-albedo path can only pick ONE of those layers, so a
+				// blended surface renders as flat layer 0. The multi-layer route
+				// keeps all the slots bound and hands dxvk-remix the layer count
+				// so it can reconstruct the blend.
+				//
+				// Default OFF: the payload zeroes the V1 slot-role nibbles, so a
+				// runtime that doesn't decode kRemixMultiLayerTerrainBit reads
+				// "no diffuse, no normal" and routes nothing at all -- strictly
+				// worse than flat layer 0. Only enable against a dxvk-remix build
+				// from fnv-terrain-ffp (or fnv-ffp), which has the decode.
+				const bool multilayer =
+					shared::common::config::get().ffp.multi_layer_terrain &&
+					psmap && psmap->multi_layer_count >= 2;
+
+				if (diag) diag->route(multilayer ? "FFP_TERRAIN_MULTILAYER"
+					: is_terrain_shape ? "FFP_TERRAIN" : is_bi_shape ? "FFP_BI" : "FFP_WORLD");
 				fnv_engage(dev);
 				game::disable_skinning(dev);
-				ffp.setup_albedo_texture(dev, psmap);
+				if (multilayer) {
+					ffp.setup_albedo_texture_preserve_slots(dev);
+				} else {
+					ffp.setup_albedo_texture(dev, psmap);
+				}
 
-				// No-normal terrain LOD is the geomorph/sink-VS class (F36CCF49): the
-				// VS sinks vertices inside HighDetailRange by GeomorphParams.y so the
-				// coarse LOD tucks under real terrain. FFP can't run that per-vertex
-				// box test, and a per-DRAW approximation can't reproduce chunks that
-				// straddle the loaded-cell boundary (verified empirically -- per-draw
-				// under-sinks straddlers and seams). So we sink the whole draw
-				// uniformly by a small amount: AUTO (LodSinkZ < 0) uses the engine's
-				// own GeomorphParams.y; tune LodSinkZ down to trade a little steady-
-				// state poke-through for less terrain drop during cell streaming.
+				// No-normal terrain LOD is the geomorph/sink-VS class: the distant
+				// terrain vertex shader (SLS2002.vso) lowers a vertex ONLY when it
+				// lands inside the loaded high-detail rectangle, after geomorphing
+				// Z between the coarse and fine meshes:
+				//
+				//   morphedZ = lerp(TEXCOORD1.x, POSITION.z, GeomorphParams.x)
+				//   inside   = |cx - HighDetailRange.x| < HighDetailRange.z
+				//           && |cy - HighDetailRange.y| < HighDetailRange.w
+				//   finalZ   = morphedZ - inside * GeomorphParams.y
+				//
+				// The legacy approach lowered the whole draw's WORLD matrix by a
+				// constant, which is wrong in both directions at once: vertices
+				// inside the rectangle got too little sink (coarse LOD z-fights the
+				// real terrain) while vertices outside it got sink they should never
+				// receive (distant terrain steps down at the LOD seam). No single
+				// LodSinkZ can satisfy both. lod_sink runs the shader's own
+				// arithmetic per vertex into a cached rewritten VB instead.
+				//
+				// LodSinkMode: 2 = per-vertex (default), 1 = legacy uniform world
+				// sink, 0 = off. The per-vertex path falls back to the uniform sink
+				// if the decl or constants are unusable, so it can never be worse.
+				bool sunk_stream = false;
 				if (ps_is_lod_shader(psmap) && !ffp.cur_decl_has_normal())
 				{
-					const float cfg_z = shared::common::config::get().ffp.lod_sink_z;
-					const float sink = (cfg_z < 0.0f)
-						? ffp.vs_const_data()[19 * 4 + 1]   // AUTO: engine GeomorphParams.y (c19.y)
-						: cfg_z;
-					game::apply_world_sink(dev, sink);
+					const auto& fcfg = shared::common::config::get().ffp;
+					game::lod_debug::count_far();
+
+					// Debug isolation: drop this LOD class entirely so it can be
+					// ruled in or out as the source of a z-fight in one toggle.
+					if (fcfg.debug_drop_far_lod)
+					{
+						ctx.restore_all(dev);
+						ctx.reset_context();
+						return S_OK;
+					}
+
+					if (fcfg.lod_sink_mode >= 2)
+					{
+						sunk_stream = game::lod_sink::bind_sunk_stream(
+							dev, BaseVertexIndex, MinVertexIndex, NumVertices);
+					}
+					if (!sunk_stream && fcfg.lod_sink_mode >= 1)
+					{
+						const float cfg_z = fcfg.lod_sink_z;
+						const float sink = (cfg_z < 0.0f)
+							? ffp.vs_const_data()[19 * 4 + 1]   // AUTO: engine GeomorphParams.y (c19.y)
+							: cfg_z;
+						game::apply_world_sink(dev, sink);
+					}
 				}
 
 				// PS-classifier drives slot-0 rebind + normal-map slot preservation
 				// + RS 149 protocol payload. Always succeeds at this point because
 				// the ps_has_diffuse_role gate above already filtered out the
 				// no-diffuse cases.
-				const bool wrote_protocol = apply_ps_protocol(dev, psmap);
-				hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+				const bool wrote_protocol = multilayer
+					? apply_multilayer_terrain_protocol(dev, psmap->multi_layer_count)
+					: apply_ps_protocol(dev, psmap);
+				// bind_sunk_stream rebased the vertex window to 0, so the draw must
+				// not re-apply BaseVertexIndex; the index range is unchanged.
+				hr = sunk_stream
+					? dev->DrawIndexedPrimitive(PrimitiveType, 0, MinVertexIndex, NumVertices, startIndex, primCount)
+					: dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+				if (sunk_stream) {
+					game::lod_sink::unbind(dev);
+				}
 				if (wrote_protocol) {
 					remix_protocol::reset_all_slots(dev);
 				}

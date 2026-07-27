@@ -65,6 +65,7 @@ constexpr auto COMP_MOD_VERSION_PATCH = 1;
 #include "../shared/common/profiler.hpp"
 #include "game/structs.hpp"
 #include "game/game.hpp"
+#include "game/lod_sink.hpp"
 #include "comp.hpp"
 
 using namespace std::literals;
