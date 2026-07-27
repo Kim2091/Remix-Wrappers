@@ -32,6 +32,11 @@ namespace comp::game
 	// Clear the fake-shadow result cache (call on device reset).
 	void clear_fake_shadow_cache();
 
+	// Per-frame maintenance; call from Present. Ages out the fake-shadow cache
+	// so a vertex buffer whose address gets recycled by a later allocation can't
+	// keep inheriting the previous mesh's verdict indefinitely.
+	void on_frame_end();
+
 	// Apply World/View/Projection from NiDX9Renderer directly (no VS constant decomposition)
 	void apply_transforms(IDirect3DDevice9* dev);
 
@@ -49,6 +54,22 @@ namespace comp::game
 	inline UINT  backbuffer_width  = 0;
 	inline UINT  backbuffer_height = 0;
 	inline bool  rendering_to_backbuffer = true;
+
+	// Swap-chain backbuffer surface, kept for POINTER IDENTITY ONLY — never
+	// dereferenced, and deliberately not AddRef'd (holding a reference to a
+	// D3DPOOL_DEFAULT surface would make IDirect3DDevice9::Reset fail). Cleared
+	// on reset and re-acquired by init_backbuffer_tracking.
+	//
+	// FNV binds several full-resolution offscreen targets (water reflection,
+	// post-process chains); the old width/height comparison classified all of
+	// them as "the backbuffer" and let them through to FFP. Identity is exact.
+	inline IDirect3DSurface9* backbuffer_surface = nullptr;
+
+	// Set once the engine is observed binding `backbuffer_surface` to RT0. Until
+	// then the legacy dimension heuristic stays in charge, so an unexpected
+	// swap-chain/bridge arrangement degrades to the old behaviour rather than
+	// classifying every draw as off-screen and disabling the whole comp.
+	inline bool  backbuffer_surface_seen = false;
 
 	void init_backbuffer_tracking(IDirect3DDevice9* dev);
 	void on_set_render_target(IDirect3DDevice9* dev, DWORD idx, IDirect3DSurface9* surface);

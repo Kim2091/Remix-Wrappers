@@ -285,6 +285,18 @@ namespace shared::common
 		if (last_vs_) { last_vs_->Release(); last_vs_ = nullptr; }
 		if (last_ps_) { last_ps_->Release(); last_ps_ = nullptr; }
 
+		// Device reset destroys every D3DPOOL_DEFAULT resource. These mirrors
+		// are raw, un-AddRef'd copies of the game's bindings, so anything left
+		// here is a dangling pointer the moment Reset returns — restore_textures
+		// would SetTexture freed objects on the first draw of the new device.
+		// Clearing the declaration through on_set_vertex_declaration(nullptr)
+		// also zeroes every cur_decl_* flag derived from it.
+		for (auto& t : cur_texture_) t = nullptr;
+		for (auto& vb : stream_vb_) vb = nullptr;
+		for (auto& off : stream_offset_) off = 0;
+		for (auto& stride : stream_stride_) stride = 0;
+		on_set_vertex_declaration(nullptr);
+
 		view_proj_valid_ = false;
 		ffp_setup_ = false;
 		tss_mode_ = tss_mode_t::none;
@@ -412,6 +424,14 @@ namespace shared::common
 		dev->SetTexture(0, albedo);
 		// INTENTIONALLY does NOT null slots 1-7 — dxvk-remix's multi-layer
 		// capture reads d3d9State.textures[1..13] directly for albedos+normals.
+	}
+
+	void ffp_state::note_stage0_override(IDirect3DBaseTexture9* tex)
+	{
+		last_albedo_stage0_ = tex;
+		// Recompute rather than OR-in: if the override happens to land back on
+		// the game's own stage-0 texture there is genuinely nothing to restore.
+		stage0_changed_ = (tex != cur_texture_[0]);
 	}
 
 	void ffp_state::restore_textures(IDirect3DDevice9* dev)

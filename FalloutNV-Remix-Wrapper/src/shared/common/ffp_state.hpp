@@ -68,6 +68,14 @@ namespace shared::common
 		// Restore original texture bindings on all 8 stages. Call after draw.
 		void restore_textures(IDirect3DDevice9* dev);
 
+		// Tell the tracker that the caller re-pointed stage 0 itself AFTER
+		// setup_albedo_texture ran (apply_ps_protocol does this when the PS
+		// labelled a non-zero slot as the diffuse). Without this, the common
+		// AlbedoStage=0 path leaves stage0_changed_ false and restore_textures
+		// skips stage 0 — the device would keep the override bound for every
+		// following passthrough draw.
+		void note_stage0_override(IDirect3DBaseTexture9* tex);
+
 		// Skinned variant of setup_texture_stages (uses ALPHAOP=SELECTARG1
 		// instead of MODULATE+DIFFUSE — the skinned vertex blend doesn't have
 		// a meaningful per-vertex alpha to combine with). Shares the tss_mode_

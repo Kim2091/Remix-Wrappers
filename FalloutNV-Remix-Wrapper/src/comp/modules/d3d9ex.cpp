@@ -22,14 +22,29 @@ namespace comp
 	HRESULT d3d9ex::D3D9Device::QueryInterface(REFIID riid, void** ppvObj)
 	{
 		TRACE_IF_ACTIVE(trace_QueryInterface, &riid, ppvObj);
+		if (!ppvObj) return E_POINTER;
 		*ppvObj = nullptr;
-		HRESULT hRes = m_pIDirect3DDevice9->QueryInterface(riid, ppvObj);
 
-		if (hRes == NOERROR) {
-			*ppvObj = this;
+		// Only substitute the proxy for interfaces whose vtable we actually
+		// implement. The old code returned `this` for ANY riid the real device
+		// accepted, so a caller asking for something we don't implement got a
+		// D3D9Device under a foreign vtable contract and crashed on first use.
+		const bool wants_device9   = (riid == IID_IDirect3DDevice9) || (riid == IID_IUnknown);
+		const bool wants_device9ex = (riid == IID_IDirect3DDevice9Ex);
+
+		if (wants_device9 || (wants_device9ex && m_pIDirect3DDevice9Ex))
+		{
+			// Reference counting runs through the inner device (see AddRef /
+			// Release), so take the ref there to keep the pairing balanced.
+			m_pIDirect3DDevice9->AddRef();
+			*ppvObj = wants_device9ex ? static_cast<void*>(static_cast<IDirect3DDevice9Ex*>(this))
+			                          : static_cast<void*>(static_cast<IDirect3DDevice9*>(this));
+			return S_OK;
 		}
 
-		return hRes;
+		// Everything else (including IID_IDirect3DDevice9Ex on a non-Ex device):
+		// let the real device answer, and hand back whatever it returns unaltered.
+		return m_pIDirect3DDevice9->QueryInterface(riid, ppvObj);
 	}
 
 	ULONG d3d9ex::D3D9Device::AddRef()
@@ -124,27 +139,41 @@ namespace comp
 		return m_pIDirect3DDevice9->GetNumberOfSwapChains();
 	}
 
-	HRESULT d3d9ex::D3D9Device::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters)
+	void d3d9ex::D3D9Device::pre_reset()
 	{
-		PROFILE_ZONE_N("d3d9::Reset");
-		TRACE_IF_ACTIVE(trace_Reset, pPresentationParameters);
 		if (auto* t = tracer::get()) t->on_reset();
 		shared::common::ffp_state::get().on_reset();
 		game::on_reset();
+		if (auto* s = skinning::get()) s->on_reset();
 		renderer_on_reset();
 		shared::common::g_shader_cache.clear_cache();
 		tex_addons::init_texture_addons(true);
 		ImGui_ImplDX9_InvalidateDeviceObjects();
-		const auto hr = m_pIDirect3DDevice9->Reset(pPresentationParameters);
+	}
+
+	void d3d9ex::D3D9Device::post_reset(HRESULT hr)
+	{
+		// Reset commonly returns D3DERR_DEVICELOST while the device is still
+		// unavailable; the game retries next frame. Recreating device objects
+		// against a device that is still lost fails and, for the ImGui backend,
+		// leaves it believing it owns objects it doesn't.
+		if (FAILED(hr)) return;
 		tex_addons::init_texture_addons();
 		ImGui_ImplDX9_CreateDeviceObjects();
+	}
+
+	HRESULT d3d9ex::D3D9Device::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters)
+	{
+		PROFILE_ZONE_N("d3d9::Reset");
+		TRACE_IF_ACTIVE(trace_Reset, pPresentationParameters);
+		pre_reset();
+		const auto hr = m_pIDirect3DDevice9->Reset(pPresentationParameters);
+		post_reset(hr);
 		return hr;
 	}
 
-	HRESULT d3d9ex::D3D9Device::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion)
+	void d3d9ex::D3D9Device::pre_present()
 	{
-		PROFILE_ZONE_N("Present");
-		TRACE_IF_ACTIVE(trace_Present, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
 		{
 			auto& ffp = shared::common::ffp_state::get();
 			if (auto* d = diagnostics::get())
@@ -159,9 +188,22 @@ namespace comp
 		if (auto* s = skinning::get()) s->on_present();
 		shared::common::ffp_state::get().on_present();
 		game::lights_updated_frame = false;
-		auto hr = m_pIDirect3DDevice9->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
+		game::on_frame_end();
+	}
+
+	void d3d9ex::D3D9Device::post_present()
+	{
 		if (auto* t = tracer::get()) t->on_present();
 		PROFILE_FRAME_MARK();
+	}
+
+	HRESULT d3d9ex::D3D9Device::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion)
+	{
+		PROFILE_ZONE_N("Present");
+		TRACE_IF_ACTIVE(trace_Present, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
+		pre_present();
+		auto hr = m_pIDirect3DDevice9->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
+		post_present();
 		return hr;
 	}
 
@@ -893,6 +935,118 @@ namespace comp
 		return m_pIDirect3DDevice9->CreateQuery(Type, ppQuery);
 	}
 
+	// ---- IDirect3DDevice9Ex ----
+	// Reached only when the device was created through CreateDeviceEx. On a
+	// plain CreateDevice device m_pIDirect3DDevice9Ex is null and these report
+	// D3DERR_INVALIDCALL, mirroring what QueryInterface already tells callers.
+
+#define REQUIRE_DEVICE9EX() if (!m_pIDirect3DDevice9Ex) return D3DERR_INVALIDCALL
+
+	HRESULT d3d9ex::D3D9Device::SetConvolutionMonoKernel(UINT width, UINT height, float* rows, float* columns)
+	{
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->SetConvolutionMonoKernel(width, height, rows, columns);
+	}
+
+	HRESULT d3d9ex::D3D9Device::ComposeRects(IDirect3DSurface9* pSrc, IDirect3DSurface9* pDst, IDirect3DVertexBuffer9* pSrcRectDescs, UINT NumRects, IDirect3DVertexBuffer9* pDstRectDescs, D3DCOMPOSERECTSOP Operation, int Xoffset, int Yoffset)
+	{
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->ComposeRects(pSrc, pDst, pSrcRectDescs, NumRects, pDstRectDescs, Operation, Xoffset, Yoffset);
+	}
+
+	HRESULT d3d9ex::D3D9Device::PresentEx(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion, DWORD dwFlags)
+	{
+		PROFILE_ZONE_N("PresentEx");
+		REQUIRE_DEVICE9EX();
+		TRACE_IF_ACTIVE(trace_Present, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
+		pre_present();
+		auto hr = m_pIDirect3DDevice9Ex->PresentEx(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
+		post_present();
+		return hr;
+	}
+
+	HRESULT d3d9ex::D3D9Device::GetGPUThreadPriority(INT* pPriority)
+	{
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->GetGPUThreadPriority(pPriority);
+	}
+
+	HRESULT d3d9ex::D3D9Device::SetGPUThreadPriority(INT Priority)
+	{
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->SetGPUThreadPriority(Priority);
+	}
+
+	HRESULT d3d9ex::D3D9Device::WaitForVBlank(UINT iSwapChain)
+	{
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->WaitForVBlank(iSwapChain);
+	}
+
+	HRESULT d3d9ex::D3D9Device::CheckResourceResidency(IDirect3DResource9** pResourceArray, UINT32 NumResources)
+	{
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->CheckResourceResidency(pResourceArray, NumResources);
+	}
+
+	HRESULT d3d9ex::D3D9Device::SetMaximumFrameLatency(UINT MaxLatency)
+	{
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->SetMaximumFrameLatency(MaxLatency);
+	}
+
+	HRESULT d3d9ex::D3D9Device::GetMaximumFrameLatency(UINT* pMaxLatency)
+	{
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->GetMaximumFrameLatency(pMaxLatency);
+	}
+
+	HRESULT d3d9ex::D3D9Device::CheckDeviceState(HWND hDestinationWindow)
+	{
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->CheckDeviceState(hDestinationWindow);
+	}
+
+	HRESULT d3d9ex::D3D9Device::CreateRenderTargetEx(UINT Width, UINT Height, D3DFORMAT Format, D3DMULTISAMPLE_TYPE MultiSample, DWORD MultisampleQuality, BOOL Lockable, IDirect3DSurface9** ppSurface, HANDLE* pSharedHandle, DWORD Usage)
+	{
+		PROFILE_ZONE_N("d3d9::CreateRenderTargetEx");
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->CreateRenderTargetEx(Width, Height, Format, MultiSample, MultisampleQuality, Lockable, ppSurface, pSharedHandle, Usage);
+	}
+
+	HRESULT d3d9ex::D3D9Device::CreateOffscreenPlainSurfaceEx(UINT Width, UINT Height, D3DFORMAT Format, D3DPOOL Pool, IDirect3DSurface9** ppSurface, HANDLE* pSharedHandle, DWORD Usage)
+	{
+		PROFILE_ZONE_N("d3d9::CreateOffscreenPlainSurfaceEx");
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->CreateOffscreenPlainSurfaceEx(Width, Height, Format, Pool, ppSurface, pSharedHandle, Usage);
+	}
+
+	HRESULT d3d9ex::D3D9Device::CreateDepthStencilSurfaceEx(UINT Width, UINT Height, D3DFORMAT Format, D3DMULTISAMPLE_TYPE MultiSample, DWORD MultisampleQuality, BOOL Discard, IDirect3DSurface9** ppSurface, HANDLE* pSharedHandle, DWORD Usage)
+	{
+		PROFILE_ZONE_N("d3d9::CreateDepthStencilSurfaceEx");
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->CreateDepthStencilSurfaceEx(Width, Height, Format, MultiSample, MultisampleQuality, Discard, ppSurface, pSharedHandle, Usage);
+	}
+
+	HRESULT d3d9ex::D3D9Device::ResetEx(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode)
+	{
+		PROFILE_ZONE_N("d3d9::ResetEx");
+		REQUIRE_DEVICE9EX();
+		TRACE_IF_ACTIVE(trace_Reset, pPresentationParameters);
+		pre_reset();
+		const auto hr = m_pIDirect3DDevice9Ex->ResetEx(pPresentationParameters, pFullscreenDisplayMode);
+		post_reset(hr);
+		return hr;
+	}
+
+	HRESULT d3d9ex::D3D9Device::GetDisplayModeEx(UINT iSwapChain, D3DDISPLAYMODEEX* pMode, D3DDISPLAYROTATION* pRotation)
+	{
+		REQUIRE_DEVICE9EX();
+		return m_pIDirect3DDevice9Ex->GetDisplayModeEx(iSwapChain, pMode, pRotation);
+	}
+
+#undef REQUIRE_DEVICE9EX
+
 #pragma endregion
 
 #pragma region _D3D9
@@ -991,6 +1145,19 @@ namespace comp
 	{
 		HRESULT hres = m_pIDirect3D9->CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, ppReturnedDeviceInterface);
 		shared::common::log("d3d9", "m_pIDirect3D9->CreateDevice", shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, false);
+
+		// D3D9 nulls the out-pointer on failure, and games retry CreateDevice
+		// with different parameters as a matter of course. Wrapping the failed
+		// result published a proxy around a null device that null-dereferenced
+		// on the first call through it.
+		if (FAILED(hres) || !ppReturnedDeviceInterface || !*ppReturnedDeviceInterface)
+		{
+			shared::common::log("d3d9",
+				std::format("CreateDevice failed (hr=0x{:08X}); not wrapping device", static_cast<unsigned>(hres)),
+				shared::common::LOG_TYPE::LOG_TYPE_WARN);
+			return hres;
+		}
+
 		*ppReturnedDeviceInterface = new d3d9ex::D3D9Device(*ppReturnedDeviceInterface);
 		shared::globals::d3d_device = *ppReturnedDeviceInterface;
 
@@ -1096,6 +1263,14 @@ namespace comp
 		HRESULT hres = m_pIDirect3D9Ex->CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, ppReturnedDeviceInterface);
 		shared::common::log("d3d9", "m_pIDirect3D9Ex->CreateDevice", shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, false);
 
+		if (FAILED(hres) || !ppReturnedDeviceInterface || !*ppReturnedDeviceInterface)
+		{
+			shared::common::log("d3d9",
+				std::format("CreateDevice failed (hr=0x{:08X}); not wrapping device", static_cast<unsigned>(hres)),
+				shared::common::LOG_TYPE::LOG_TYPE_WARN);
+			return hres;
+		}
+
 		*ppReturnedDeviceInterface = new d3d9ex::D3D9Device(*ppReturnedDeviceInterface);
 		shared::globals::d3d_device = *ppReturnedDeviceInterface;
 
@@ -1119,7 +1294,26 @@ namespace comp
 
 	HRESULT __stdcall d3d9ex::_d3d9ex::CreateDeviceEx(UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags, D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode, IDirect3DDevice9Ex** ppReturnedDeviceInterface)
 	{
-		return (m_pIDirect3D9Ex->CreateDeviceEx(Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, pFullscreenDisplayMode, ppReturnedDeviceInterface));
+		HRESULT hres = m_pIDirect3D9Ex->CreateDeviceEx(Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, pFullscreenDisplayMode, ppReturnedDeviceInterface);
+		shared::common::log("d3d9", "m_pIDirect3D9Ex->CreateDeviceEx", shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, false);
+
+		if (FAILED(hres) || !ppReturnedDeviceInterface || !*ppReturnedDeviceInterface)
+		{
+			shared::common::log("d3d9",
+				std::format("CreateDeviceEx failed (hr=0x{:08X}); not wrapping device", static_cast<unsigned>(hres)),
+				shared::common::LOG_TYPE::LOG_TYPE_WARN);
+			return hres;
+		}
+
+		// Previously returned unwrapped: none of the comp's hooks fired and
+		// globals::d3d_device stayed null, silently disabling the whole mod for
+		// anything that creates its device through the Ex path. D3D9Device now
+		// implements IDirect3DDevice9Ex so it can stand in here too.
+		auto* proxy = new d3d9ex::D3D9Device(*ppReturnedDeviceInterface);
+		*ppReturnedDeviceInterface = proxy;
+		shared::globals::d3d_device = proxy;
+
+		return hres;
 	}
 
 	HRESULT __stdcall d3d9ex::_d3d9ex::GetAdapterLUID(UINT Adapter, LUID* pLUID)

@@ -114,13 +114,30 @@ namespace comp::game
 		constexpr int          SHADOW_DARK_THRESH = 250;  // >=1 vert R < this
 		enum { SHADOW_UNKNOWN = 0, SHADOW_IS_FAKE = 1, SHADOW_NOT_FAKE = 2 };
 
+		// Verdicts are keyed on the full stream-0 window, not just (vb, base).
+		// Two different meshes routinely share a vertex buffer at the same base
+		// with different counts/strides, and the 6-bit slot hash collides freely.
 		struct ShadowCacheEntry
 		{
 			IDirect3DVertexBuffer9* vb = nullptr;
-			int base_vtx = 0;
-			int result = SHADOW_UNKNOWN;
+			int  base_vtx  = 0;
+			UINT num_verts = 0;
+			UINT stride    = 0;
+			UINT offset    = 0;
+			int  result    = SHADOW_UNKNOWN;
 		};
 		ShadowCacheEntry g_shadow_cache[SHADOW_CACHE_SIZE];
+
+		// A vertex buffer address freed on cell unload can be handed straight
+		// back out by the next allocation, and the replacement mesh would then
+		// inherit the old verdict (geometry silently vanishing, or baked shadows
+		// coming back). We can't detect that — holding a reference to keep the
+		// address unique would pin D3DPOOL_DEFAULT buffers and break Reset — so
+		// age the whole table out on a fixed cadence instead. Locking a vertex
+		// buffer crosses the Remix bridge, so this trades a bounded ~1s window of
+		// staleness for 1/N of the re-lock cost a per-frame flush would pay.
+		constexpr UINT SHADOW_CACHE_FLUSH_FRAMES = 64;
+		UINT g_shadow_cache_frame = 0;
 
 		// PS hashes whose NOLIGHTING+gray draws are meaningful UI, not shadows.
 		constexpr uint32_t kFakeShadowKeep[] = { 0x95C1E039u /* Pip-Boy body */ };
@@ -198,7 +215,16 @@ namespace comp::game
 
 	void clear_fake_shadow_cache()
 	{
-		for (auto& e : g_shadow_cache) { e.vb = nullptr; e.base_vtx = 0; e.result = SHADOW_UNKNOWN; }
+		for (auto& e : g_shadow_cache) e = ShadowCacheEntry{};
+	}
+
+	void on_frame_end()
+	{
+		if (++g_shadow_cache_frame >= SHADOW_CACHE_FLUSH_FRAMES)
+		{
+			g_shadow_cache_frame = 0;
+			clear_fake_shadow_cache();
+		}
 	}
 
 	bool should_skip_fake_shadow(IDirect3DDevice9* dev, INT base_vtx, UINT num_verts,
@@ -225,17 +251,20 @@ namespace comp::game
 
 		auto* vb = ffp.stream_vb(0);
 		UINT stride = ffp.stream_stride(0);
+		UINT offset = ffp.stream_offset(0);
 		if (!vb || stride == 0 || num_verts == 0) return false;
 
 		const unsigned int slot =
 			((static_cast<unsigned int>(reinterpret_cast<uintptr_t>(vb) >> 4))
-				^ static_cast<unsigned int>(base_vtx)) & (SHADOW_CACHE_SIZE - 1);
+				^ static_cast<unsigned int>(base_vtx)
+				^ (num_verts * 2654435761u)) & (SHADOW_CACHE_SIZE - 1);
 		auto& e = g_shadow_cache[slot];
-		if (e.vb == vb && e.base_vtx == base_vtx)
+		if (e.vb == vb && e.base_vtx == base_vtx && e.num_verts == num_verts &&
+			e.stride == stride && e.offset == offset)
 			return e.result == SHADOW_IS_FAKE
 				&& draw_writes_depth(dev) && !draw_uses_viewmodel_projection();
 
-		const UINT read_off = ffp.stream_offset(0) + static_cast<UINT>(base_vtx) * stride;
+		const UINT read_off = offset + static_cast<UINT>(base_vtx) * stride;
 		const UINT read_size = num_verts * stride;
 		void* data = nullptr;
 		if (FAILED(vb->Lock(read_off, read_size, &data, D3DLOCK_READONLY)) || !data)
@@ -245,7 +274,8 @@ namespace comp::game
 			num_verts, stride, static_cast<UINT>(ffp.cur_decl_color_off()), ffp.cur_decl_color_type());
 		vb->Unlock();
 
-		e.vb = vb; e.base_vtx = base_vtx; e.result = result;
+		e.vb = vb; e.base_vtx = base_vtx; e.num_verts = num_verts;
+		e.stride = stride; e.offset = offset; e.result = result;
 
 		return result == SHADOW_IS_FAKE
 			&& draw_writes_depth(dev) && !draw_uses_viewmodel_projection();
@@ -305,6 +335,12 @@ namespace comp::game
 				backbuffer_height = desc.Height;
 				shared::common::log("Game", std::format("Backbuffer: {}x{}", desc.Width, desc.Height));
 			}
+
+			// Keep the address for identity comparisons, then drop the reference
+			// immediately — see the declaration in game.hpp for why we must not
+			// hold it. The pointer is never dereferenced.
+			backbuffer_surface = bb;
+			backbuffer_surface_seen = false;
 			bb->Release();
 		}
 		rendering_to_backbuffer = true;
@@ -313,8 +349,39 @@ namespace comp::game
 	void on_set_render_target(IDirect3DDevice9* /*dev*/, DWORD idx, IDirect3DSurface9* surface)
 	{
 		PROFILE_ZONE_N("game::on_set_render_target");
-		if (idx != 0 || !surface) return;
+		if (idx != 0) return;
 
+		// D3D9 rejects a null RT0, but the wrapper is called before the forward
+		// so don't leave a stale verdict behind on a call that will fail anyway.
+		if (!surface)
+		{
+			rendering_to_backbuffer = false;
+			return;
+		}
+
+		if (backbuffer_surface && surface == backbuffer_surface)
+		{
+			if (!backbuffer_surface_seen)
+			{
+				backbuffer_surface_seen = true;
+				shared::common::log("Game", "Backbuffer RT identity confirmed (exact off-screen detection active)");
+			}
+			rendering_to_backbuffer = true;
+			return;
+		}
+
+		// Identity tracking has proven itself, so anything that isn't the
+		// backbuffer surface is off-screen — including full-resolution targets
+		// the dimension heuristic used to wave through.
+		if (backbuffer_surface_seen)
+		{
+			rendering_to_backbuffer = false;
+			return;
+		}
+
+		// Never yet seen the engine bind our cached backbuffer. Fall back to the
+		// legacy size comparison so an unexpected swap-chain arrangement can't
+		// mark every draw off-screen and silently disable FFP conversion.
 		D3DSURFACE_DESC desc;
 		if (SUCCEEDED(surface->GetDesc(&desc)))
 			rendering_to_backbuffer = (desc.Width == backbuffer_width && desc.Height == backbuffer_height);
@@ -670,6 +737,16 @@ namespace comp::game
 	{
 		release_skin_cache();
 		clear_fake_shadow_cache();
+
+		// Reset destroys the swap chain; the old backbuffer address is dead and
+		// a resolution change invalidates the cached extents. Zeroing the width
+		// is what makes on_begin_scene_cb re-run init_backbuffer_tracking.
+		backbuffer_surface = nullptr;
+		backbuffer_surface_seen = false;
+		backbuffer_width = 0;
+		backbuffer_height = 0;
+		rendering_to_backbuffer = true;
+
 		num_bones = 0;
 		prev_num_bones = 0;
 		bones_drawn = false;

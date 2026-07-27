@@ -22,7 +22,17 @@ namespace comp
 		{
 			if (release)
 			{
-				if (tex_addons::berry) tex_addons::berry->Release();
+				// Null the pointer and drop the initialized flag: D3DXCreateTextureFromFileA
+				// leaves *tex untouched when it fails (missing berry.png), so a
+				// release that isn't followed by a successful reload would leave a
+				// freed pointer here for the next Reset / destructor to release
+				// again, and for tab_about() to draw with.
+				if (tex_addons::berry)
+				{
+					tex_addons::berry->Release();
+					tex_addons::berry = nullptr;
+				}
+				tex_addons::initialized = false;
 				return;
 			}
 
@@ -100,6 +110,12 @@ namespace comp
 		if (auto* tex = ffp.cur_texture(diffuseSlot)) {
 			if (tex != ffp.last_albedo_stage0()) {
 				dev->SetTexture(0, tex);
+				// setup_albedo_texture only marks stage 0 dirty when ITS pick
+				// differed from the game's binding. On the default AlbedoStage=0
+				// path the pick IS the game's binding, so without this the
+				// override below would never be restored and every subsequent
+				// passthrough draw would sample this texture at s0.
+				ffp.note_stage0_override(tex);
 			}
 		}
 
@@ -197,6 +213,19 @@ namespace comp
 	static void fnv_disengage(IDirect3DDevice9* dev)
 	{
 		auto& ffp = shared::common::ffp_state::get();
+
+		// Bone uploads for a skinned object are swallowed by game::on_set_vs_const_f
+		// (replayed as SetTransform) and never reach the device's c[] file. Any
+		// route that lands here with a skinned declaration is about to draw with
+		// the GAME's real skinning vertex shader, which reads those registers.
+		// draw_skinned_dip flushes them on its own fallbacks, but the offscreen-RT,
+		// no-view-proj and 2D routes are all tested BEFORE the skinned branch and
+		// would otherwise render FaceGen heads / shadow-map passes with whatever
+		// bones happened to be left in the register file.
+		if (ffp.cur_decl_is_skinned()) {
+			game::flush_bones_to_device(dev);
+		}
+
 		game::disable_skinning(dev);
 		ffp.disengage(dev);
 		if (!s_world_is_identity_)
@@ -381,6 +410,13 @@ namespace comp
 		{
 			PROFILE_ZONE_N("route_PASS_NO_VP");
 			if (diag) diag->route("PASS_NO_VP");
+			// Must disengage like every other passthrough route. FFP stays
+			// engaged across draws, and is_enabled() flips to false mid-frame
+			// when the tracer starts a capture — without this the draw would run
+			// with nulled shaders and the engine WORLD matrix still bound, which
+			// is both a visual corruption and the opposite of what the capture is
+			// supposed to record.
+			fnv_disengage(dev);
 			hr = dev->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
 			im->m_stats._drawcall_indexed_prim.track_single();
 			im->m_stats._drawcall_indexed_prim_using_vs.track_single();

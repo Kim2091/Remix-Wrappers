@@ -240,7 +240,7 @@ link /nologo /DLL /SUBSYSTEM:WINDOWS /DEBUG /PDBCompress %LF% %LIBPATH% ^
     "%OUT%\imgui.lib" ^
     "%OUT%\minhook.lib" ^
     %TRACY_LIBS% ^
-    d3dx9.lib psapi.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib
+    d3dx9.lib dxguid.lib psapi.lib user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib
 if errorlevel 1 goto :fail
 
 :: Copy INI to build output (game-specific copy takes priority over template)

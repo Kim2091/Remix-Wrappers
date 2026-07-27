@@ -8,10 +8,23 @@ namespace comp
 		d3d9ex();
 
 	private:
-		class D3D9Device : public IDirect3DDevice9
+		// Derives from IDirect3DDevice9Ex, not IDirect3DDevice9. The Ex vtable is
+		// a strict superset — its first 119 slots are IDirect3DDevice9's, in the
+		// same order — so handing this object out as an IDirect3DDevice9* is
+		// exactly as valid as before, while a device created through
+		// IDirect3D9Ex::CreateDeviceEx can now be wrapped by the same class
+		// instead of escaping the comp entirely.
+		//
+		// m_pIDirect3DDevice9Ex is null for plain CreateDevice: the Ex entry
+		// points then fail with D3DERR_INVALIDCALL and QueryInterface refuses
+		// IID_IDirect3DDevice9Ex, which is what the real device would do too.
+		class D3D9Device : public IDirect3DDevice9Ex
 		{
 		public:
-			D3D9Device(IDirect3DDevice9* pOriginal) : m_pIDirect3DDevice9(pOriginal) {};
+			D3D9Device(IDirect3DDevice9* pOriginal)
+				: m_pIDirect3DDevice9(pOriginal), m_pIDirect3DDevice9Ex(nullptr) {};
+			D3D9Device(IDirect3DDevice9Ex* pOriginal)
+				: m_pIDirect3DDevice9(pOriginal), m_pIDirect3DDevice9Ex(pOriginal) {};
 			virtual ~D3D9Device() {};
 
 			HRESULT __stdcall QueryInterface(REFIID riid, void** ppvObj) override;
@@ -134,8 +147,37 @@ namespace comp
 			HRESULT __stdcall DeletePatch(UINT Handle) override;
 			HRESULT __stdcall CreateQuery(D3DQUERYTYPE Type, IDirect3DQuery9** ppQuery) override;
 
+			// --- IDirect3DDevice9Ex ---
+			// All forward to m_pIDirect3DDevice9Ex, or fail when the wrapped
+			// device isn't an Ex device. PresentEx / ResetEx share the frame and
+			// device-loss bookkeeping with Present / Reset.
+			HRESULT __stdcall SetConvolutionMonoKernel(UINT width, UINT height, float* rows, float* columns) override;
+			HRESULT __stdcall ComposeRects(IDirect3DSurface9* pSrc, IDirect3DSurface9* pDst, IDirect3DVertexBuffer9* pSrcRectDescs, UINT NumRects, IDirect3DVertexBuffer9* pDstRectDescs, D3DCOMPOSERECTSOP Operation, int Xoffset, int Yoffset) override;
+			HRESULT __stdcall PresentEx(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion, DWORD dwFlags) override;
+			HRESULT __stdcall GetGPUThreadPriority(INT* pPriority) override;
+			HRESULT __stdcall SetGPUThreadPriority(INT Priority) override;
+			HRESULT __stdcall WaitForVBlank(UINT iSwapChain) override;
+			HRESULT __stdcall CheckResourceResidency(IDirect3DResource9** pResourceArray, UINT32 NumResources) override;
+			HRESULT __stdcall SetMaximumFrameLatency(UINT MaxLatency) override;
+			HRESULT __stdcall GetMaximumFrameLatency(UINT* pMaxLatency) override;
+			HRESULT __stdcall CheckDeviceState(HWND hDestinationWindow) override;
+			HRESULT __stdcall CreateRenderTargetEx(UINT Width, UINT Height, D3DFORMAT Format, D3DMULTISAMPLE_TYPE MultiSample, DWORD MultisampleQuality, BOOL Lockable, IDirect3DSurface9** ppSurface, HANDLE* pSharedHandle, DWORD Usage) override;
+			HRESULT __stdcall CreateOffscreenPlainSurfaceEx(UINT Width, UINT Height, D3DFORMAT Format, D3DPOOL Pool, IDirect3DSurface9** ppSurface, HANDLE* pSharedHandle, DWORD Usage) override;
+			HRESULT __stdcall CreateDepthStencilSurfaceEx(UINT Width, UINT Height, D3DFORMAT Format, D3DMULTISAMPLE_TYPE MultiSample, DWORD MultisampleQuality, BOOL Discard, IDirect3DSurface9** ppSurface, HANDLE* pSharedHandle, DWORD Usage) override;
+			HRESULT __stdcall ResetEx(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode) override;
+			HRESULT __stdcall GetDisplayModeEx(UINT iSwapChain, D3DDISPLAYMODEEX* pMode, D3DDISPLAYROTATION* pRotation) override;
+
 		private:
-			IDirect3DDevice9 *m_pIDirect3DDevice9;
+			// Shared by Reset / ResetEx and Present / PresentEx: the comp-side
+			// teardown that must happen before the device is reset, and the
+			// rebuild that must only happen if it succeeded.
+			void pre_reset();
+			void post_reset(HRESULT hr);
+			void pre_present();
+			void post_present();
+
+			IDirect3DDevice9   *m_pIDirect3DDevice9;
+			IDirect3DDevice9Ex *m_pIDirect3DDevice9Ex;  // null unless created via CreateDeviceEx
 		};
 
 	public:

@@ -76,6 +76,12 @@ namespace shared::common
 	// drives all D3D9 traffic on the render thread.
 	class PsShaderClassifier {
 	public:
+		// NOTE: deliberately no destructor-driven clear(). The global instance
+		// is destroyed during static teardown, which can run after the D3D9
+		// device and the Remix bridge DLL are already gone -- releasing the
+		// cached shaders there would be a crash on exit. Letting the process
+		// reclaim them is the correct trade.
+
 		// Returns a stable pointer to the cached PsSlotMap for this shader,
 		// classifying it on first sight. Returns nullptr if shader is null.
 		const PsSlotMap* classify(IDirect3DPixelShader9* shader) {
@@ -99,18 +105,43 @@ namespace shared::common
 
 			// Hash hit -> store ptr alias for next time and return
 			if (const auto it = hash_cache_.find(hash); it != hash_cache_.end()) {
-				ptr_cache_[shader] = it->second;
-				return &ptr_cache_[shader];
+				return &insert_ptr_alias(shader, it->second);
 			}
 
 			// First sighting: parse sampler declarations
 			PsSlotMap map = parse_samplers(bytecode.data(), hash);
 			hash_cache_[hash] = map;
-			ptr_cache_[shader] = map;
-			return &ptr_cache_[shader];
+			return &insert_ptr_alias(shader, map);
+		}
+
+		// Drops every reference the pointer cache owns. Not called anywhere by
+		// default (see the note above); only safe while the D3D9 device is still
+		// alive, and invalidates every map handed out by classify().
+		void clear() {
+			for (auto& [shader, map] : ptr_cache_) {
+				if (shader) shader->Release();
+			}
+			ptr_cache_.clear();
+			hash_cache_.clear();
 		}
 
 	private:
+		// Adds the (shader pointer -> map) alias, taking a reference on the
+		// shader. The pointer IS the cache key, so if the game released a shader
+		// and the allocator handed the same address to a different one, every
+		// later lookup would return the previous shader's slot map -- textures
+		// routed to the wrong material channel, draws tagged Ignore that
+		// shouldn't be. Owning a reference keeps the address unique for the
+		// process lifetime. FNV creates a few hundred pixel shaders, so holding
+		// them all alive costs nothing worth measuring.
+		PsSlotMap& insert_ptr_alias(IDirect3DPixelShader9* shader, const PsSlotMap& map) {
+			const auto [it, inserted] = ptr_cache_.try_emplace(shader, map);
+			if (inserted) {
+				shader->AddRef();
+			}
+			return it->second;
+		}
+
 		static PsSlotRole role_for_name(const char* name) {
 			if (!name) return PsSlotRole::Other;
 			// Diffuse aliases first (BaseMap and TexMap are the most common)
