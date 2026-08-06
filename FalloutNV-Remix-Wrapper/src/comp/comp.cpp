@@ -19,6 +19,7 @@ namespace comp
 		static float* s_game_hour = nullptr;
 		static bool   s_initialized = false;
 		static int    s_frame_count = 0;
+		static std::uint32_t s_log_counter = 0;
 
 		// Wait this many frames before touching the remix API
 		static constexpr int WARMUP_FRAMES = 120;
@@ -36,6 +37,17 @@ namespace comp
 			else
 				shared::common::log("SunCycle", "GameHour TESGlobal not found",
 					shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
+
+			// The two hours at which the engine's own arc crosses the horizon.
+			// Anything odd about the cycle shows up here first.
+			float a, b;
+			if (game::get_sun_horizon_hours(a, b))
+				shared::common::log("SunCycle",
+					std::format("horizon crossings: sunrise={:.2f} sunset={:.2f}", a, b),
+					shared::common::LOG_TYPE::LOG_TYPE_STATUS, true);
+			else
+				shared::common::log("SunCycle", "climate transition times unavailable",
+					shared::common::LOG_TYPE::LOG_TYPE_WARN, true);
 		}
 
 		static void update()
@@ -48,8 +60,9 @@ namespace comp
 
 			if (!s_initialized) init();
 
-			float elevation, rotation;
-			if (!game::get_sun_orientation(elevation, rotation)) return;
+			float elevation, rotation, hour = -1.0f;
+			bool night = false;
+			if (!game::get_sun_orientation(elevation, rotation, &hour, &night)) return;
 
 			char buf[32];
 			snprintf(buf, sizeof(buf), "%.2f", elevation);
@@ -57,6 +70,13 @@ namespace comp
 
 			snprintf(buf, sizeof(buf), "%.2f", rotation);
 			api.m_bridge.SetConfigVariable("rtx.atmosphere.sunRotation", buf);
+
+			// Mirrors the MoonCycle cadence so the two can be read side by side.
+			if ((s_log_counter++ % 300) == 0)
+				shared::common::log("SunCycle",
+					std::format("hour={:.2f} elev={:.2f} rot={:.2f} {}",
+						hour, elevation, rotation, night ? "night" : "day"),
+					shared::common::LOG_TYPE::LOG_TYPE_STATUS, false);
 		}
 
 		// Symmetric disable path. sunElevation/sunRotation are RtxOption
