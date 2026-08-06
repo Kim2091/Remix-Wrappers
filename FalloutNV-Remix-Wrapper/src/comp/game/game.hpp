@@ -115,5 +115,13 @@ namespace comp::game
 
 	// --- Init ---
 
+	// Resolve engine globals and read config. Safe from DllMain — reads and
+	// writes nothing in the game's own code.
 	extern void init_game_addresses();
+
+	// Apply the fixed-address patches to FalloutNV.exe's .text/.rdata. Must NOT
+	// be called from DllMain: the retail Steam executable is still SteamStub-
+	// encrypted at that point and patching it corrupts real code once the .bind
+	// stub decrypts. Call once the game window exists.
+	extern void install_game_patches();
 }

@@ -762,6 +762,61 @@ namespace comp::game
 
 
 	// ================================================================
+	// Patch-site verification
+	//
+	// Every code patch below writes to a fixed address inside FalloutNV.exe's
+	// .text. Two things can put something other than the expected opcodes
+	// there, and both used to be overwritten in silence:
+	//
+	//  - A different executable: modded, repacked, ASLR-rebased, or simply
+	//    not 1.4.0.525.
+	//  - The retail Steam executable, BEFORE its entry point has run. That
+	//    build is SteamStub-wrapped: .text ships encrypted and the .bind
+	//    stub decrypts it in place at the entry point. d3d9.dll is a static
+	//    import of the exe, so our DllMain runs first — writing at that point
+	//    modifies CIPHERTEXT, and the in-place decrypt then turns the whole
+	//    surrounding block into garbage instructions. The game dies a few
+	//    seconds later inside code we never meant to touch, with nothing in
+	//    any log. That is why these patches are installed from the window
+	//    thread now (see install_game_patches) instead of from DllMain.
+	//
+	// Refusing to patch costs a feature. Patching the wrong bytes corrupts
+	// the game, so an unrecognised site is always a skip, never a write.
+	// ================================================================
+
+	static std::string hex_bytes(const unsigned char* p, size_t n)
+	{
+		std::string s;
+		for (size_t i = 0; i < n; ++i)
+			s += std::format("{}{:02X}", i ? " " : "", p[i]);
+		return s;
+	}
+
+	// True when `addr` holds exactly `expected`. Logs the mismatch otherwise.
+	static bool verify_site(unsigned int addr, std::initializer_list<unsigned char> expected,
+		const char* feature, const char* what)
+	{
+		const auto* p = reinterpret_cast<const unsigned char*>(addr);
+
+		bool match = true;
+		for (size_t i = 0; i < expected.size(); ++i)
+			match = match && (p[i] == expected.begin()[i]);
+
+		if (match)
+			return true;
+
+		shared::common::log("Game",
+			std::format("{}: 0x{:X} ({}) holds [{}], expected [{}] - NOT patching. "
+				"Un-decrypted (SteamStub) or non-standard FalloutNV.exe.",
+				feature, addr, what,
+				hex_bytes(p, expected.size()),
+				hex_bytes(expected.begin(), expected.size())),
+			shared::common::LOG_TYPE::LOG_TYPE_WARN, true);
+		return false;
+	}
+
+
+	// ================================================================
 	// Game engine hooks (skinning)
 	// ================================================================
 
@@ -773,6 +828,29 @@ namespace comp::game
 		if (!shared::common::config::get().skinning.enabled)
 		{
 			shared::common::log("Game", "Skinning: hooks SKIPPED (config disabled)");
+			return;
+		}
+
+		// Verify all three sites up front and install as a group. A half-patched
+		// render path is worse than an unpatched one: the code cave's stubs tail
+		// back into the middle of a function that would still hold its original
+		// call, so partial success has to mean no writes at all.
+		// `&` and not `&&` on purpose — every mismatched site should get logged,
+		// which is the whole diagnostic value when a user reports a bad exe.
+		const bool sites_ok =
+			// jz +0x58 -> becomes jmp
+			verify_site(0xB992F2, { 0x74, 0x58 },                   "Skinning", "broken-skinning jz")
+			// call 0xB99110 -> becomes jmp cave+0
+			& verify_site(0xB99598, { 0xE8, 0x73, 0xFB, 0xFF, 0xFF }, "Skinning", "render_skinned call")
+			// call 0x43D450 -> becomes jmp cave+64
+			& verify_site(0xB991E7, { 0xE8, 0x64, 0x42, 0x8A, 0xFF }, "Skinning", "reset_bones call");
+
+		if (!sites_ok)
+		{
+			shared::common::log("Game",
+				"Skinning: hooks SKIPPED - patch sites did not match. The FFP path falls back "
+				"to the vertex-declaration heuristic; the game is left untouched.",
+				shared::common::LOG_TYPE::LOG_TYPE_WARN, true);
 			return;
 		}
 
@@ -945,16 +1023,15 @@ namespace comp::game
 		bool ok = true;
 
 		// Hook 1 (0x8743A6): rewrite a 5-byte relative CALL so this one call site
-		// goes to our SetCullMode replacement. Sanity-check the opcode first; if
-		// FNV is patched/cracked differently we want to log and skip, not corrupt code.
+		// goes to our SetCullMode replacement. The whole call is verified, not just
+		// the opcode — one byte is thin cover, and a wrong target here would send
+		// the call somewhere arbitrary rather than fail loudly.
 		{
 			auto* addr = reinterpret_cast<unsigned char*>(0x8743A6);
 			DWORD old_prot;
-			if (addr[0] != 0xE8)
+			// call 0x4FB0B0 (BSCullingProcess::SetCullMode)
+			if (!verify_site(0x8743A6, { 0xE8, 0x05, 0x6D, 0xC8, 0xFF }, "Culling", "SetCullMode call"))
 			{
-				shared::common::log("Game",
-					std::format("Culling: WARNING - 0x8743A6 opcode 0x{:02X}, expected 0xE8; skipping SetCullMode hook", addr[0]),
-					shared::common::LOG_TYPE::LOG_TYPE_WARN);
 				ok = false;
 			}
 			else if (VirtualProtect(addr, 5, PAGE_EXECUTE_READWRITE, &old_prot))
@@ -975,10 +1052,20 @@ namespace comp::game
 
 		// Hook 2 (0x101E330): vtable slot 0x11 of BSCullingProcess_vtable
 		// (0x101E2EC + 0x44). Replace Process(NiAVObject*) with our visit-all stub.
+		//
+		// This one lives in .rdata, which SteamStub leaves in the clear, so it is
+		// not exposed to the decrypt hazard the .text sites are. It is still
+		// verified: a slot holding anything but stock BSCullingProcess::Process
+		// means either a different executable or another mod that already owns
+		// this vtable, and stomping that mod's detour would break it silently.
 		{
 			auto* slot = reinterpret_cast<void**>(0x101E330);
 			DWORD old_prot;
-			if (VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old_prot))
+			if (!verify_site(0x101E330, { 0x90, 0xEE, 0xC4, 0x00 }, "Culling", "Process vtable slot"))
+			{
+				ok = false;
+			}
+			else if (VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old_prot))
 			{
 				*slot = reinterpret_cast<void*>(&BSCullingProcess_ProcessEx);
 				VirtualProtect(slot, sizeof(void*), old_prot, &old_prot);
@@ -1039,11 +1126,9 @@ namespace comp::game
 		shared::common::log("Game", std::format("Lights: enabled={} intensity={:.0f}% rangeMode={}",
 			lights_enabled, light_intensity * 100.0f, light_range_mode));
 
-		// Install skinning hooks (hardcoded addresses — FNV specific)
-		install_skinning_hooks();
-
-		// Install culling-disable hooks (Wall_SoGB patch port)
-		install_culling_hooks();
+		// NOTE: the game-code patches deliberately do NOT run here. This function
+		// is called from DllMain, which is too early to touch .text — see
+		// install_game_patches.
 
 		if (use_pattern)
 		{
@@ -1063,6 +1148,35 @@ namespace comp::game
 					found_pattern_count, total_pattern_count), shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
 			}
 		}
+	}
+
+
+	// ================================================================
+	// Game code patches
+	//
+	// Split out of init_game_addresses (and so out of DllMain) on purpose.
+	// d3d9.dll is a static import of FalloutNV.exe, so DllMain runs before the
+	// executable's entry point. On the retail Steam build the entry point is
+	// SteamStub's .bind unpacker, which decrypts .text in place — patching from
+	// DllMain therefore edits ciphertext, and the decrypt turns the surrounding
+	// block into garbage instructions. That crashed the game a few seconds into
+	// the first scene, in code we never intended to touch, with a clean Remix
+	// log and nothing to point at. (v0.0.4; only un-patched Steam copies were
+	// affected — the 4GB patcher strips SteamStub, which is why GOG and
+	// 4GB-patched installs were fine.)
+	//
+	// Called from the window thread instead: once the game window exists the
+	// entry point has long since run, so .text is real code. The per-site byte
+	// checks in verify_site are the backstop if that ever stops holding.
+	// ================================================================
+
+	void install_game_patches()
+	{
+		// Skinning hooks (hardcoded addresses — FNV specific)
+		install_skinning_hooks();
+
+		// Culling-disable hooks (Wall_SoGB patch port)
+		install_culling_hooks();
 	}
 
 #undef PATTERN_OFFSET_SIMPLE

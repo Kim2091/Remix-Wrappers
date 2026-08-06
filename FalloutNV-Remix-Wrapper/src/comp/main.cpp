@@ -69,6 +69,13 @@ namespace comp
 			Beep(523, 100);
 		}
 
+		// Patch the game's code now, not from DllMain. The window existing means
+		// the exe's entry point has run, which on the retail Steam build is what
+		// decrypts .text (SteamStub). Patching before that corrupts real code.
+		// Kept ahead of the post-load DLLs so our patches still go in first,
+		// the same relative order they had when this ran from DllMain.
+		comp::game::install_game_patches();
+
 		// Post-load DLLs (after window is found, game is running)
 		d3d9_proxy::load_postload_dlls();
 
